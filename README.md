@@ -42,4 +42,4 @@ dsh plugin --profile dsh-tui remove dsh-tui-antigravity
 - 原生会话改名、分叉和删除等操作仍需在官方 CLI 中完成。Windows 原生和 macOS 端到端流程、两个真实 Google 账号切换尚待实测。详见[功能与限制](docs/usage.md)和[验收记录](docs/verification.md)。
 - [提交问题](https://github.com/wuqiuwangtian/dsh-tui-antigravity/issues)时请附系统、终端、dsh-tui 和 agy 的版本，以及出现问题的步骤。贴日志前请删去授权链接、令牌、账号和私有路径。
 
-插件代码采用 [MIT](LICENSE) 许可。宿主补丁所含上游代码的版权与许可见[第三方声明](THIRD-PARTY-NOTICES.md)。
+插件代码采用 [MIT](LICENSE) 许可。启动页吉祥物参考社区流传的猫娘形象，经 AI 辅助生成并制作为像素立绘。素材来源说明与宿主补丁的上游版权条款见[第三方声明](THIRD-PARTY-NOTICES.md)。

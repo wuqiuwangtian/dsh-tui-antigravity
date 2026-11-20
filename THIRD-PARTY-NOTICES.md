@@ -23,3 +23,7 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+## Mascot artwork
+
+The optional splash portraits and their terminal previews were created for this community plugin with AI assistance, using a community illustration as a visual reference. The reference artist and license are unknown. The reference illustration is not distributed. The MIT notice covers the project code; the project does not claim ownership of the underlying community character design or grant third-party rights. The artwork is unofficial.
