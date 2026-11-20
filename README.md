@@ -32,7 +32,7 @@ dsh-tui --backend antigravity
 | 后台任务 | `/agy tasks` 展示当前会话收到的计时器、动态工作流及后台智能体调用状态，可刷新。一次性定时器触发后，回复和审批仍能到达当前会话。后台调用的状态来自 agy 的工具事件。`/agy team` 可选中一个直接子代理，翻页或刷新其可见回复和工具记录。列表先核对父会话的创建记录，打开时再核对来自父会话的原生消息。该面板适用于默认本机资料目录。 |
 | 模型与执行 | 模型、思考强度和权限模式从当前 ACP 会话读取，变更后以服务端返回值为准。`/plan`、`/plan off` 切换原生模式。agy 公布 compact 后可使用宿主的 `/compact`。`/agy commands` 列出当前会话动态公布的命令；可用 `/agy <命令> [参数]` 调用它们，包括本机观察到的 compact、goal、schedule、browser、swarm 等。具体可用性随账号、版本和配置变化。 |
 | 聊天与工具 | 流式文本和思考、图片输入、工具调用和 diff、原生权限审批、ACP 表单问题、取消、排队和回合内引导。`/agy diff` 汇总当前会话已完成的工具结果中有前后文本的编辑。文件操作是否需要审批由 agy 决定。[官方权限规则](https://antigravity.google/docs/permissions) |
-| 历史与会话 | `dsh-tui --backend antigravity --resume <id>`、宿主会话浏览器、官方 `agy --conversation <id>` 使用同一份原生历史。恢复前核对目录和身份，避免误开空会话。退出时显示恢复命令。`/agy native` 显示当前会话专用的往返命令，方便使用原生终端专属功能。跨前端操作同一会话时，先关闭已有写入端。 |
+| 历史与会话 | `dsh-tui --backend antigravity --resume <id>`、宿主会话浏览器、官方 `agy --conversation <id>` 使用同一份原生历史。恢复前核对目录和身份，避免误开空会话。退出时显示恢复命令。`/agy native` 显示当前会话专用的往返命令，方便使用原生终端专属功能。同一测试 profile 的第二个 dsh-TUI 会提示会话被占用。官方 agy 在第一个 TUI 挂载期间仍能在同一会话完成新回合，宿主的占用锁只约束 dsh-TUI。跨前端接力时先退出已有写入端。 |
 
 ## 验收证据
 
@@ -73,6 +73,6 @@ DSH_HOME=/path/to/test-dsh uv run --no-project --with pyte --with pexpect test/t
 | 第三方模型 | 当前客户端只展示 agy 向它公布的模型。官方明确限定哪些 ACP 编辑器可用第三方模型。[官方客户端与模型范围](https://antigravity.google/docs/ide/extensions/acp) |
 | 终端专属交互 | 语音、CLI 状态栏、终端标题、原生任务监视器和完整子代理管理器等依赖原生终端、后台服务或特定 UI。本机可通过 `/agy commands` 查看会话实际上报的命令。可以查看计时器及子代理活动和直接子代理记录。原生任务的逐项停止、子代理消息单独投递、产物逐行批注和快捷键跳转外部编辑器仍用原生 CLI。原生 `/btw` 的独立临时问答和 `/context` 的详细分类均未通过 ACP 提供，宿主只能展示 ACP 实际推送的上下文总量。搜代码面板提供匹配预览。 |
 | 配置编辑与集成 | 界面可编辑上表的五个全局字段及权限规则。原生 `--remote-agent` 和 `--project` 没有对应的本机 ACP 启动选项。其他高级配置和 hook 编写仍用原生入口。插件不维护第二套账户、配额、任务或历史数据库。 |
-| 仍待验证 | 授权失效后的真实恢复、两端并发写保护、跨平台、多账号端到端及大规模历史。历史回放可重建 ACP 返回的图片字节；本机 agy 1.5.13 的真实图片对话在恢复时未返回原图，旧图片只在提供字节时可见。动态出现的 ACP 命令只表示原生可调用，一次性定时器、读取本地网页和单步动态工作流已有实测。重复 cron、远程业务网页及长期运行的大型工作流尚未逐项实测。 |
+| 仍待验证 | 授权失效后的真实恢复、跨平台、多账号端到端及大规模历史。历史回放可重建 ACP 返回的图片字节；本机 agy 1.5.13 的真实图片对话在恢复时未返回原图，旧图片只在提供字节时可见。动态出现的 ACP 命令只表示原生可调用，一次性定时器、读取本地网页和单步动态工作流已有实测。重复 cron、远程业务网页及长期运行的大型工作流尚未逐项实测。 |
 
 对标参考为 [dsh-TUI v0.20.2 的 Codex 后端](https://github.com/ccch1mneyyy/dsh-TUI/blob/v0.20.2/docs/codex-backend.md)、[宿主后端插件契约](https://github.com/ccch1mneyyy/dsh-TUI/tree/v0.20.2/scripts/fixtures/third-party-backend) 和 [Antigravity 官方配额面板](https://antigravity.google/docs/cli/commands/usage)。
