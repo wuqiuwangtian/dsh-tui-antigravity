@@ -9,9 +9,11 @@
 首版验收环境为 WSL、dsh-tui 0.20.2、dsh 0.2.2-rc.5 和 agy 1.5.13。先确保当前终端能运行 `dsh-tui`、`dsh`、`pnpm` 和 `agy acp --help`。Node.js 版本遵循 dsh-tui 的要求。首次使用 dsh-tui，请先单独启动一次，完成宿主初始化后退出。
 
 ```sh
-dsh plugin --profile dsh-tui add https://github.com/wuqiuwangtian/dsh-tui-antigravity/releases/download/v0.1.0/dsh-tui-antigravity-0.1.0.tgz
+dsh plugin --profile dsh-tui add dsh-tui-antigravity
 dsh-tui --backend antigravity
 ```
+
+npm 渠道从 v0.1.1 开始提供。需要固定版本时，在包名后加 `@0.1.1`。也可把 [GitHub Release](https://github.com/wuqiuwangtian/dsh-tui-antigravity/releases) 中对应版本的 `.tgz` 下载链接传给同一条 add 命令。已发布的 [v0.1.0 安装说明](https://github.com/wuqiuwangtian/dsh-tui-antigravity/blob/v0.1.0/README.md) 仍可使用。
 
 已登录 agy 的用户可以直接发送第一句话，随后输入 `/usage` 检查配额。首次登录时输入 `/login`，按提示完成 Google 授权，回到 TUI 输入 `/new`。浏览器未弹出时，登录页提供打开和复制链接入口。后续也可从启动页或 `/kernel` 选择 Antigravity。
 
@@ -43,3 +45,13 @@ dsh plugin --profile dsh-tui remove dsh-tui-antigravity
 - [提交问题](https://github.com/wuqiuwangtian/dsh-tui-antigravity/issues)时请附系统、终端、dsh-tui 和 agy 的版本，以及出现问题的步骤。贴日志前请删去授权链接、令牌、账号和私有路径。
 
 插件代码采用 [MIT](LICENSE) 许可。启动页吉祥物参考社区流传的猫娘形象，经 AI 辅助生成并制作为像素立绘。素材来源说明与宿主补丁的上游版权条款见[第三方声明](THIRD-PARTY-NOTICES.md)。
+
+## 兼容性
+
+| 组件 | 已验证版本 | 验证范围 |
+| --- | --- | --- |
+| dsh-tui 后端 | 0.20.2 | WSL 真实对话、配额、审批、历史恢复 |
+| 可选启动页 | 0.20.2 | 图片与字符回退、80×24 布局及补丁撤销 |
+| agy | 1.5.13 | ACP、登录、模型、配额与原生会话；详细边界见使用手册 |
+
+[上游兼容检查](https://github.com/wuqiuwangtian/dsh-tui-antigravity/actions/workflows/compat.yml) 每天检查 npm 上的 dsh-tui 稳定版和 agy 官方 Linux 版本。新版本在 CI 中分别检查后端、启动页和无账号 ACP 握手；真实账号验收及更新上表由维护者完成。[启动页插件接口讨论](https://github.com/ccch1mneyyy/dsh-TUI/discussions/2069)

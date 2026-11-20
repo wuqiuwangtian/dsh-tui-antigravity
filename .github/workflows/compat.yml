@@ -1,0 +1,86 @@
+name: Upstream compatibility
+on:
+  schedule:
+    - cron: '23 4 * * *'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  discover:
+    runs-on: ubuntu-latest
+    outputs:
+      host: ${{ steps.latest.outputs.host }}
+      agy: ${{ steps.latest.outputs.agy }}
+      plugin: ${{ steps.latest.outputs.plugin }}
+      url: ${{ steps.latest.outputs.url }}
+      digest: ${{ steps.latest.outputs.digest }}
+    steps:
+      - id: latest
+        shell: bash
+        run: |
+          host=$(npm view @deepseek-harness-tui/dsh-tui dist-tags.latest)
+          plugin=$(npm view dsh-tui-antigravity dist-tags.latest)
+          [[ "$host" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ && "$plugin" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          curl --fail --silent --show-error --retry 3 'https://antigravity-cli-auto-updater-974169037036.us-central1.run.app/manifests/linux_amd64.json' -o manifest.json
+          jq -e '(.version|test("^[0-9]+\\.[0-9]+\\.[0-9]+$")) and (.sha512|test("^[a-fA-F0-9]{128}$")) and (.url|test("^https://storage\\.googleapis\\.com/antigravity-public/[a-zA-Z0-9_./-]+$"))' manifest.json >/dev/null
+          echo "host=$host" >> "$GITHUB_OUTPUT"
+          echo "plugin=$plugin" >> "$GITHUB_OUTPUT"
+          jq -r '"agy="+.version,"url="+.url,"digest="+.sha512' manifest.json >> "$GITHUB_OUTPUT"
+  verify:
+    needs: discover
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    strategy:
+      fail-fast: false
+      matrix:
+        component: [backend, ui, agy]
+    env:
+      HOST_VERSION: ${{ needs.discover.outputs.host }}
+      PLUGIN_SPEC: dsh-tui-antigravity@${{ needs.discover.outputs.plugin }}
+      AGY_CLI_DISABLE_AUTO_UPDATE: 'true'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/cache/restore@v4
+        id: previous
+        with:
+          path: .compat-passed
+          lookup-only: true
+          key: compat-${{ matrix.component }}-${{ github.sha }}-${{ needs.discover.outputs.plugin }}-${{ matrix.component == 'agy' && needs.discover.outputs.digest || needs.discover.outputs.host }}
+      - uses: actions/setup-node@v4
+        if: steps.previous.outputs.cache-hit != 'true' || github.event_name == 'workflow_dispatch'
+        with:
+          node-version: 24
+      - name: Exercise the installed host and backend
+        if: matrix.component != 'agy' && (steps.previous.outputs.cache-hit != 'true' || github.event_name == 'workflow_dispatch')
+        run: |
+          npm install -g @deepseek-ai/dsh@0.2.2-rc.5 pnpm@12.6.0
+          python3 -m venv "$RUNNER_TEMP/venv"
+          source "$RUNNER_TEMP/venv/bin/activate"
+          pip install pexpect==4.9.0 pyte==0.8.2
+          DSH_HOME="$RUNNER_TEMP/dsh" bash scripts/compat-host.sh "${{ matrix.component }}"
+      - name: Check official agy without a Google account
+        if: matrix.component == 'agy' && (steps.previous.outputs.cache-hit != 'true' || github.event_name == 'workflow_dispatch')
+        env:
+          DOWNLOAD_URL: ${{ needs.discover.outputs.url }}
+          DIGEST: ${{ needs.discover.outputs.digest }}
+          AGY_VERSION: ${{ needs.discover.outputs.agy }}
+        run: |
+          cd "$RUNNER_TEMP"
+          curl -fsSL --retry 3 "$DOWNLOAD_URL" -o agy.tgz
+          echo "$DIGEST  agy.tgz" | sha512sum --check
+          tar -xOzf agy.tgz antigravity > agy
+          chmod +x agy
+          test "$(./agy --version)" = "$AGY_VERSION"
+          ./agy acp --help >/dev/null
+          npm install --prefix consumer "$PLUGIN_SPEC"
+          export ANTIGRAVITY_EXECUTABLE="$PWD/agy"
+          cd consumer/node_modules/dsh-tui-antigravity
+          node --input-type=module -e "import {connect} from './connection.js';const rpc=await connect(process.cwd());await rpc.close()"
+      - name: Record successful version check
+        if: steps.previous.outputs.cache-hit != 'true'
+        run: echo ok > .compat-passed
+      - uses: actions/cache/save@v4
+        if: steps.previous.outputs.cache-hit != 'true'
+        with:
+          path: .compat-passed
+          key: ${{ steps.previous.outputs.cache-primary-key }}

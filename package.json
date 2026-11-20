@@ -1,7 +1,6 @@
 {
   "name": "dsh-tui-antigravity",
-  "version": "0.1.0",
-  "private": true,
+  "version": "0.1.1",
   "type": "module",
   "exports": {
     ".": "./backend.js"
@@ -46,5 +45,9 @@
   "repository": {
     "type": "git",
     "url": "git+https://github.com/wuqiuwangtian/dsh-tui-antigravity.git"
+  },
+  "description": "Antigravity CLI backend and optional pixel-art branding for dsh-tui",
+  "publishConfig": {
+    "access": "public"
   }
 }

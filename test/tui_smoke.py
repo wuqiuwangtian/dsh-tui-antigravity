@@ -17,13 +17,12 @@ profile = Path(os.environ["DSH_HOME"]).resolve()
 if not (profile / "profiles/dsh-tui").is_dir():
     raise SystemExit("DSH_HOME must contain a dsh-tui test profile with this plugin installed")
 native = shutil.which("agy")
-if not native:
-    raise SystemExit("agy is required")
+
 
 
 def run(work, test_home, executable, scenario, marker=None):
     env = dict(os.environ, DSH_HOME=str(profile), HOME=str(test_home),
-               TERM="xterm-256color", ANTIGRAVITY_EXECUTABLE=str(executable))
+               TERM="xterm-256color", DSH_TUI_LANG="zh", ANTIGRAVITY_EXECUTABLE=str(executable))
     if scenario == "accounts":
         env.update(AGY_FIXTURE_IDENTITIES=str(test_home / "account"), BROWSER="true")
     if scenario == "login":
@@ -142,13 +141,15 @@ args.add_argument("--accounts", action="store_true", help="exercise account swit
 args.add_argument("--login", action="store_true", help="only check the sign-in screen with an isolated home")
 args.add_argument("--workflows", action="store_true", help="exercise an authenticated custom skill and a one-shot timer")
 options = args.parse_args()
+if not native and not options.accounts:
+    raise SystemExit("agy is required")
 with tempfile.TemporaryDirectory(prefix="agy-tui-smoke-") as temp:
     root = Path(temp)
     # Only the agy process uses the current login for read-only quota/config.
     # The TUI and its settings writer use test_home in all three scenarios.
     wrapper = root / "authenticated-agy"
     wrapper.write_text("#!/bin/sh\nexport HOME=" + shlex.quote(str(Path.home())) +
-                       "\nexec " + shlex.quote(native) + ' "$@"\n')
+                       "\nexec " + shlex.quote(native or 'agy') + ' "$@"\n')
     wrapper.chmod(0o700)
     modes = ("usage", "config", "login")
     if options.accounts:
