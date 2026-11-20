@@ -1,5 +1,16 @@
 #!/usr/bin/env node
 import { createInterface } from 'node:readline'
+if (process.argv.includes('--login')) {
+  console.log('https://accounts.google.com/o/oauth2/auth?test=1')
+  for await (const code of createInterface({ input: process.stdin })) process.exit(code === 'fixture-code' ? 0 : 1)
+  process.exit(1)
+}
+if (process.argv.includes('-p')) {
+  console.log(JSON.stringify({ event: 'command_result', command: { name: 'usage', data: { groups: [
+    { name: 'Example', buckets: [{ name: 'Week', remaining_fraction: 0.75 }] }] } } }))
+  console.log(JSON.stringify({ event: 'result', result: { status: 'SUCCESS', num_turns: 0 } }))
+  process.exit(0)
+}
 const sessionId = 'fixture-session'
 const send = data => process.stdout.write(JSON.stringify({ jsonrpc: '2.0', ...data }) + '\n')
 const update = update => send({ method: 'session/update', params: { sessionId, update } })
@@ -12,7 +23,10 @@ for await (const line of createInterface({ input: process.stdin })) {
       send({ id, result: { sessions: [{ sessionId, cwd: process.cwd(), title: 'fixture' },
         { sessionId: 'foreign', cwd: '/another-project', title: 'other' }] } })
       break
-    case 'session/new': send({ id, result: { sessionId } }); break
+    case 'session/load': send({ id, result: { sessionId } }); break
+    case 'session/new':
+      if (process.env.AGY_FIXTURE_SIGNIN) { send({ id, error: { code: -32000, message: 'Authentication required' } }); break }
+      send({ id, result: { sessionId } }); break
     case 'session/prompt':
       prompting = id
       if (params.prompt[0].text === 'exit') process.exit(1)

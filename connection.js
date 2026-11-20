@@ -9,6 +9,7 @@ export async function connect(cwd, handlers = {}) {
   app.onNotification('session/update', ({ params }) => handlers.update?.(params))
   app.onRequest('session/request_permission', ({ params, signal }) =>
     handlers.permission?.(params, signal) ?? { outcome: { outcome: 'cancelled' } })
+  if (handlers.elicit) app.onRequest('elicitation/create', ({ params, signal }) => handlers.elicit(params, signal))
   const child = spawn(executable(), ['acp'], { cwd, stdio: ['pipe', 'pipe', 'ignore'] })
   const connection = app.connect(ndJsonStream(Writable.toWeb(child.stdin), Readable.toWeb(child.stdout)))
   child.once('error', error => connection.close(error))
@@ -36,7 +37,7 @@ export async function connect(cwd, handlers = {}) {
     } finally { signal?.removeEventListener('abort', abort) }
   }
   try {
-    const hello = await request('initialize', { protocolVersion: 1, clientCapabilities: {} }, { signal: AbortSignal.timeout(20000) })
+    const hello = await request('initialize', { protocolVersion: 1, clientCapabilities: handlers.elicit ? { elicitation: { form: {} } } : {} }, { signal: AbortSignal.timeout(20000) })
     if (hello.protocolVersion !== 1) throw new Error('Unsupported ACP protocol version')
     return { hello, request, notify: (m, p) => connection.agent.notify(m, p), close, closed: connection.closed }
   } catch (error) {

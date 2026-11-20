@@ -11,7 +11,13 @@
     "session.js",
     "connection.js",
     "dsh-plugin.json",
-    "cordis.patch.yml"
+    "cordis.patch.yml",
+    "reports.js",
+    "panels.js",
+    "login.js",
+    "forms.js",
+    "mcp.js",
+    "management.js"
   ],
   "scripts": {
     "test": "node --test test/*.test.js"

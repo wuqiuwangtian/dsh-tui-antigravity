@@ -40,7 +40,7 @@ export const backend = {
     try {
       const { stdout } = await run(executable(), ['--version'], { timeout: 5000 })
       await run(executable(), ['acp', '--help'], { timeout: 5000 })
-      return { installed: true, version: stdout.trim(), auth: 'unknown' }
+      return { installed: true, version: stdout.trim(), auth: 'unknown', loginInSession: true }
     } catch { return { installed: false, hint: 'Install Antigravity CLI with ACP support (agy acp --help).' } }
   },
   launch: {
@@ -54,6 +54,7 @@ export const backend = {
         return recent
       }
       function setLastSession(id) {
+        if (id.startsWith('signin-')) return
         recent = id
         if (!file) return
         mkdirSync(host.dataDir, { recursive: true })
@@ -75,7 +76,14 @@ export const backend = {
     if (target.kind === 'resume') {
       // agy 1.5.9 may acknowledge session/load for a nonexistent UUID.
       // Verify membership before asking it to open anything.
-      const row = await backend.catalog.info(target.sessionId, cwd)
+      let row
+      try { row = await backend.catalog.info(target.sessionId, cwd) }
+      catch (error) {
+        if (error.code !== -32000) throw error
+        const session = new Session(resolve(cwd ?? host.cwd))
+        session.enterLogin(target)
+        return session
+      }
       if (!row?.cwd) throw new Error('Cannot locate this session in the native Antigravity catalog.')
       cwd = row.cwd
     }

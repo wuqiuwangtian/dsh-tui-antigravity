@@ -78,3 +78,53 @@ test('scope listings locally and reject an unknown resume before session/load', 
   assert.deepEqual(rows.map(s => s.id), ['fixture-session'])
   await assert.rejects(backend.open({ kind: 'resume', sessionId: 'absent', cwd }, {}), /native Antigravity catalog/)
 })
+
+test('quota uses a native command result and refreshes without opening a model turn', async t => {
+  const s = await start(t)
+  const first = observe(s, 'question.request')
+  await s.submit({ text: '/usage', clientMessageId: 'usage' })
+  const { request } = await first
+  assert.match(request.questions[0].detail, /75%/)
+  const refreshed = observe(s, 'question.request')
+  s.capabilities.questions.respond(request.requestId, { answers: [{ selected: ['刷新'] }] })
+  s.capabilities.questions.cancel((await refreshed).request.requestId)
+  assert.ok(!(await s.history()).some(e => e.type === 'turn.start'))
+})
+
+test('first login uses a secret host field and cancellation leaves the existing credential untouched', async t => {
+  process.env.AGY_FIXTURE_SIGNIN = '1'
+  t.after(() => { delete process.env.AGY_FIXTURE_SIGNIN })
+  const s = await start(t)
+  assert.ok(s.needsLogin)
+  const prompt = observe(s, 'question.request')
+  const signedIn = s.capabilities.auth.login()
+  const {request} = await prompt
+  assert.equal(request.questions[0].secret, true)
+  s.capabilities.questions.cancel(request.requestId)
+  await signedIn
+  assert.equal(s.status, 'idle')
+  assert.ok(!(await s.history()).some(e => e.type === 'question.request'))
+})
+
+test('login replaces the ACP connection only after native authorization and original session lookup', async t => {
+  const s = await start(t)
+  const previous = s.rpc
+  const prompt = observe(s, 'question.request')
+  const signedIn = s.capabilities.auth.login()
+  const {request} = await prompt
+  s.capabilities.questions.respond(request.requestId, { answers: [{ custom: 'fixture-code', selected: [] }] })
+  await signedIn
+  assert.notEqual(s.rpc, previous)
+  assert.equal(s.status, 'idle')
+  assert.ok(!JSON.stringify(await s.history()).includes('fixture-code'))
+})
+
+test('ACP elicitation maps displayed choices back to native values', async t => {
+  const s = await start(t)
+  const prompt = observe(s, 'question.request')
+  const result = s.elicit({ mode: 'form', sessionId: s.id, message: 'Pick', requestedSchema: {
+    properties: { language: { type: 'string', oneOf: [{ title: 'English', const: 'en' }] } }
+  } })
+  s.capabilities.questions.respond((await prompt).request.requestId, { answers: [{ selected: ['English'] }] })
+  assert.equal((await result).content.language, 'en')
+})

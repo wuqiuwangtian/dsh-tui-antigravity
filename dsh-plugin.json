@@ -32,6 +32,8 @@
           "capabilities": [
             "native",
             "diagnostics",
+            "mcp",
+            "account",
             "pendingRetraction",
             "permissions",
             "models",
@@ -39,7 +41,9 @@
             "modes",
             "commands",
             "context",
-            "images"
+            "images",
+            "auth",
+            "questions"
           ],
           "grants": [],
           "confirmation": {
