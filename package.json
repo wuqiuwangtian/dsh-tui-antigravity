@@ -23,7 +23,10 @@
     "management.js",
     "settings.js",
     "search.js",
-    "ui"
+    "ui",
+    "THIRD-PARTY-NOTICES.md",
+    "docs/usage.md",
+    "docs/verification.md"
   ],
   "scripts": {
     "test": "node --test test/*.test.js"
@@ -38,5 +41,10 @@
     "image-size": "2.1.0",
     "jsonc-parser": "3.3.1",
     "proper-lockfile": "4.1.2"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/wuqiuwangtian/dsh-tui-antigravity.git"
   }
 }

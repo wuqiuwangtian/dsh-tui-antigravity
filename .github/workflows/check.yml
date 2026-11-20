@@ -1,0 +1,25 @@
+name: Check release package
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm test
+      - name: Test packaged entry point in a clean project
+        run: |
+          tarball=$(npm pack --silent --pack-destination "$RUNNER_TEMP")
+          mkdir "$RUNNER_TEMP/consumer"
+          cd "$RUNNER_TEMP/consumer"
+          npm init -y >/dev/null
+          npm install "$RUNNER_TEMP/$tarball"
+          node --input-type=module -e "import { backend } from 'dsh-tui-antigravity'; import assert from 'node:assert/strict'; assert.equal(typeof backend.open, 'function')"
+          dir=node_modules/dsh-tui-antigravity
+          for file in dsh-plugin.json cordis.patch.yml LICENSE THIRD-PARTY-NOTICES.md; do test -s "$dir/$file"; done
