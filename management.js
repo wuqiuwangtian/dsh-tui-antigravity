@@ -14,7 +14,30 @@ async function input(panels, signal, question, detail) {
   return answers?.[0]?.custom?.trim()
 }
 
+export const managers = {
+  plugins: '管理原生插件',
+  mcp: '管理原生 MCP 服务',
+  remote: '查看和控制本机远程服务',
+}
+
+async function remoteControl(cwd, panels, signal) {
+  const call = (...args) => run(executable(), ['remote-control', ...args], { cwd, signal, timeout: 45000 })
+  while (!signal.aborted) {
+    const { stdout, stderr } = await call('status')
+    const detail = [stdout.trim(), stderr.trim()].filter(Boolean).join('\n')
+    const selected = await choose(panels, signal, 'Antigravity Remote Control', ['关闭', '刷新', '启动至本次系统登录结束', '停止并注销设备'], detail)
+    if (!selected || selected === '关闭') return
+    if (selected === '刷新') continue
+    const start = selected === '启动至本次系统登录结束'
+    const args = start ? ['start', '--session'] : ['stop']
+    const confirm = await choose(panels, signal, start ? '向 Google 注册本机并启动远程控制服务？' : '停止远程控制并注销此设备？',
+      ['返回', '确认'], 'agy remote-control ' + args.join(' '))
+    if (confirm === '确认') await call(...args)
+  }
+}
+
 export async function manage(kind, cwd, panels, signal) {
+  if (kind === 'remote') return remoteControl(cwd, panels, signal)
   const plugins = kind === 'plugins'
   const noun = plugins ? '插件' : 'MCP 服务'
   const add = plugins ? '安装插件' : '添加 MCP 服务'

@@ -4,13 +4,13 @@ import { ClientApp, ndJsonStream } from '@agentclientprotocol/sdk'
 
 export const executable = () => process.env.ANTIGRAVITY_EXECUTABLE || 'agy'
 
-export async function connect(cwd, handlers = {}) {
+export async function connect(cwd, handlers = {}, directories = [], agent) {
   const app = new ClientApp()
   app.onNotification('session/update', ({ params }) => handlers.update?.(params))
   app.onRequest('session/request_permission', ({ params, signal }) =>
     handlers.permission?.(params, signal) ?? { outcome: { outcome: 'cancelled' } })
   if (handlers.elicit) app.onRequest('elicitation/create', ({ params, signal }) => handlers.elicit(params, signal))
-  const child = spawn(executable(), ['acp'], { cwd, stdio: ['pipe', 'pipe', 'ignore'] })
+  const child = spawn(executable(), ['acp', ...(agent ? ['--agent', agent] : []), ...directories.flatMap(dir => ['--add-dir', dir])], { cwd, stdio: ['pipe', 'pipe', 'ignore'] })
   const connection = app.connect(ndJsonStream(Writable.toWeb(child.stdin), Readable.toWeb(child.stdout)))
   child.once('error', error => connection.close(error))
   child.stdin.on('error', error => connection.close(error))

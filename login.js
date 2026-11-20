@@ -16,7 +16,8 @@ export async function googleLogin(cwd, panels, signal) {
   const dialogSignal = AbortSignal.any([signal, pending.signal, AbortSignal.timeout(300000)])
   const stop = () => child.kill()
   dialogSignal.addEventListener('abort', stop, { once: true })
-  void exited.then(() => pending.abort())
+  let nativeSuccess = false
+  void exited.then(ok => { nativeSuccess = ok; pending.abort() })
   try {
     for await (const line of reader) {
       let url
@@ -27,6 +28,7 @@ export async function googleLogin(cwd, panels, signal) {
         detail: '授权由 Antigravity CLI 完成。可按 Esc 取消。', link: url.href,
         options: [], secret: true }], dialogSignal)
       const code = answer?.[0]?.custom?.trim()
+      if (nativeSuccess && !signal.aborted) return true
       if (!code || /[\r\n]/.test(code) || dialogSignal.aborted) return false
       child.stdin.end(code + '\n')
       if (!await exited) throw new Error('Google 授权未完成。请重新运行 /login。')

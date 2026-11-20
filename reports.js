@@ -1,5 +1,6 @@
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
+import { settings } from './settings.js'
 import { executable } from './connection.js'
 
 const run = promisify(execFile)
@@ -20,7 +21,7 @@ export async function readReport(name, cwd, signal) {
   const command = name === 'quota' ? 'usage' : name
   let stdout
   try {
-    const result = await run(executable(), ['--output-format', 'stream-json', '--print-timeout', '20s', '-p', '/' + command],
+    const result = await run(executable(), ['--settings', '{"disableSlashCommands":false}', '--output-format', 'stream-json', '--print-timeout', '20s', '-p', '/' + command],
       { cwd, signal, timeout: 25000, maxBuffer: 2 * 1024 * 1024 })
     stdout = result.stdout
   } catch (error) {
@@ -46,5 +47,19 @@ export async function readReport(name, cwd, signal) {
     }
     if (lines.length) return { text: lines.join('\n'), windows }
   }
+  const data = report.command.data ?? {}
+  if (name === 'config') {
+    const config = data.config
+    if (!config || typeof config !== 'object') return { text: '当前 agy 未提供结构化配置。' }
+    return { text: [...settings.keys()].map(key => key + ' · ' + (JSON.stringify(config[key]) ?? '未提供')).join('\n') }
+  }
+  if (name === 'agents' && Array.isArray(data.agents)) {
+    const agents = data.agents.filter(a => typeof a === 'string' && a && !a.startsWith('-'))
+    return { text: agents.join('\n') || '当前工作区没有可选的自定义智能体。', agents }
+  }
+  if (name === 'permissions' && !result.response?.trim() && Array.isArray(data.permissions)) {
+    return { text: data.permissions.map(p => Object.keys(p).length === 1 ? p.scope + ' · 无显式规则' : JSON.stringify(p)).join('\n') }
+  }
+  if (name === 'hooks' && Array.isArray(data.hooks) && !data.hooks.length) return { text: '当前没有配置 Hooks。' }
   return { text: result.response?.trim() || '官方 CLI 未返回内容。' }
 }

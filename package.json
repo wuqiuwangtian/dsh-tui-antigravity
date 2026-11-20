@@ -8,6 +8,7 @@
   },
   "files": [
     "backend.js",
+    "artifacts.js",
     "session.js",
     "connection.js",
     "dsh-plugin.json",
@@ -17,7 +18,9 @@
     "login.js",
     "forms.js",
     "mcp.js",
-    "management.js"
+    "management.js",
+    "settings.js",
+    "search.js"
   ],
   "scripts": {
     "test": "node --test test/*.test.js"
@@ -28,6 +31,9 @@
     }
   },
   "dependencies": {
-    "@agentclientprotocol/sdk": "2.8.0"
+    "@agentclientprotocol/sdk": "2.8.0",
+    "image-size": "2.1.0",
+    "jsonc-parser": "3.3.1",
+    "proper-lockfile": "4.1.2"
   }
 }

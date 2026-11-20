@@ -1,7 +1,15 @@
 #!/usr/bin/env node
+import { appendFileSync } from 'node:fs'
 import { createInterface } from 'node:readline'
+if (process.argv[2] === 'remote-control') {
+  const args = process.argv.slice(3)
+  appendFileSync(process.env.AGY_FIXTURE_REMOTE_LOG, args.join(' ') + '\n')
+  if (args[0] === 'status') console.log('Daemon status: inactive')
+  process.exit(0)
+}
 if (process.argv.includes('--login')) {
   console.log('https://accounts.google.com/o/oauth2/auth?test=1')
+  if (process.env.AGY_FIXTURE_CALLBACK) setTimeout(() => process.exit(0), 100)
   for await (const code of createInterface({ input: process.stdin })) process.exit(code === 'fixture-code' ? 0 : 1)
   process.exit(1)
 }

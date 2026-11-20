@@ -3,11 +3,11 @@ import assert from 'node:assert/strict'
 import { fileURLToPath } from 'node:url'
 import { backend } from '../backend.js'
 
-function observe(session, type) {
+function observe(session, type, match = () => true) {
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => { unsubscribe(); reject(new Error('Missing ' + type)) }, 4000)
     const unsubscribe = session.subscribe(events => {
-      const found = events.find(e => e.type === type)
+      const found = events.find(e => e.type === type && match(e))
       if (found) { unsubscribe(); clearTimeout(timer); resolve(found) }
     })
   })
@@ -81,11 +81,12 @@ test('scope listings locally and reject an unknown resume before session/load', 
 
 test('quota uses a native command result and refreshes without opening a model turn', async t => {
   const s = await start(t)
-  const first = observe(s, 'question.request')
+  const isResult = e => e.request.questions[0].options.some(o => o.label === '刷新')
+  const first = observe(s, 'question.request', isResult)
   await s.submit({ text: '/usage', clientMessageId: 'usage' })
   const { request } = await first
   assert.match(request.questions[0].detail, /75%/)
-  const refreshed = observe(s, 'question.request')
+  const refreshed = observe(s, 'question.request', isResult)
   s.capabilities.questions.respond(request.requestId, { answers: [{ selected: ['刷新'] }] })
   s.capabilities.questions.cancel((await refreshed).request.requestId)
   assert.ok(!(await s.history()).some(e => e.type === 'turn.start'))
@@ -127,4 +128,43 @@ test('ACP elicitation maps displayed choices back to native values', async t => 
   } })
   s.capabilities.questions.respond((await prompt).request.requestId, { answers: [{ selected: ['English'] }] })
   assert.equal((await result).content.language, 'en')
+})
+
+test('dismissal during a quota refresh closes the query without reopening a result dialog', async t => {
+  const s = await start(t)
+  const requests = []
+  s.subscribe(events => {
+    for (const e of events) if (e.type === 'question.request') {
+      requests.push(e.request)
+      s.capabilities.questions.cancel(e.request.requestId)
+    }
+  })
+  await s.submit({ text: '/quota', clientMessageId: 'wait' })
+  await new Promise(resolve => setTimeout(resolve, 100))
+  assert.equal(requests.length, 1)
+  assert.ok(!s.localAction)
+})
+
+test('replay combines text and images from one user message and restores attachment bytes', async t => {
+  const s = await start(t)
+  s.status = 'starting'
+  const data = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII='
+  s.update({ sessionUpdate: 'user_message_chunk', messageId: 'one', content: { type: 'text', text: 'Look' } })
+  s.update({ sessionUpdate: 'user_message_chunk', messageId: 'one', content: { type: 'image', mimeType: 'image/png', data } })
+  s.update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'OK' } })
+  const rows = (await s.history()).filter(e => e.type === 'user.message')
+  assert.equal(rows.length, 1)
+  assert.equal(rows[0].id, 'one')
+  assert.equal(rows[0].images[0].width, 1)
+  assert.equal((await rows[0].images[0].read()).toString('base64'), data)
+})
+
+test('a native browser callback completes the sign-in while the code field is still open', async t => {
+  process.env.AGY_FIXTURE_CALLBACK = '1'
+  t.after(() => { delete process.env.AGY_FIXTURE_CALLBACK })
+  const s = await start(t)
+  const previous = s.rpc
+  await s.capabilities.auth.login()
+  assert.notEqual(s.rpc, previous)
+  assert.equal(s.panels.pending.size, 0)
 })

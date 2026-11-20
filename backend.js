@@ -7,6 +7,8 @@ import { connect, executable } from './connection.js'
 import { Session } from './session.js'
 
 const run = promisify(execFile)
+// One explicit preset choice applies to the next new conversation in this workspace.
+const nextAgents = new Map()
 
 async function list(scope = {}, onPartial) {
   const cwd = resolve(scope.cwd ?? process.cwd())
@@ -87,8 +89,11 @@ export const backend = {
       if (!row?.cwd) throw new Error('Cannot locate this session in the native Antigravity catalog.')
       cwd = row.cwd
     }
-    const session = new Session(resolve(cwd))
+    const dir = resolve(cwd)
+    const agent = target.kind === 'create' ? nextAgents.get(dir) : undefined
+    const session = new Session(dir, { agent, stageAgent: name => nextAgents.set(dir, name) })
     await session.open(target)
+    if (!session.needsLogin && agent && nextAgents.get(dir) === agent) nextAgents.delete(dir)
     return session
   },
 }
