@@ -41,7 +41,7 @@ dsh-tui --backend antigravity
 - **原生会话** 实测 TUI → 官方 CLI → TUI 往返、跨前端记忆和恢复后工作目录。已实测切换模型、强度及计划模式、识别图片颜色。agy 1.5.13 在一轮执行期间接受了第二条 prompt 并输出更正内容。实测 `/agy goal` 在临时工作区创建并读回含随机内容的文件，`/compact` 的原生请求成功结束；计划模式生成的真实实施计划能在产物面板读回校验词。原生提问能在 dsh 表单回答，所选自定义智能体能返回仅在预设中写入的随机校验词。附加目录内的测试文件读取成功；移除后另一份随机文件触发审批，拒绝后未读取。真实 ACP 握手、账户模型目录和回合会耗用本机登录及相应额度。
 - **管理操作** 在临时 HOME 中通过真实 agy 添加、停用、删除 MCP 服务和本地测试插件。真实 dsh-TUI 逐项确认后写入测试 HOME。另用已授权的 agy 通过临时 `--settings` 覆盖文件读回执行模式和权限规则，两项查询均为零模型回合。已实测远程服务状态查询，启动和注销涉及真实设备注册，仅在明确确认后执行。
 
-一次性 `/agy schedule` 在发起回合返回后唤醒 agy，真实 dsh-TUI 显示了它从测试文件读取的随机校验词，任务面板显示完成。工作区自定义 `SKILL.md` 的斜杠入口也已在真实 TUI 验证。原生 `run_workflow` 的单步 Python 脚本经单次审批返回正确计算结果；`/agy browser` 在 WSL 连接独立的临时 Chromium，通过页面渲染读回随机值。浏览器功能需要同一运行环境具有可连接的 Chrome；本次测试使用独立浏览器资料目录。[原生计时器](https://antigravity.google/docs/commands/schedule) · [原生浏览器要求](https://antigravity.google/docs/commands/browser)
+一次性 `/agy schedule` 在发起回合返回后唤醒 agy，真实 dsh-TUI 显示了它从测试文件读取的随机校验词，任务面板显示完成。另用原生钩子限制只允许注册一个非守护 cron（每分钟一次、最多两次），两次触发分别读回测试文件，会话收到含随机校验词及不同迭代号的两条回复。工作区自定义 `SKILL.md` 的斜杠入口也已在真实 TUI 验证。原生 `run_workflow` 的单步 Python 脚本经单次审批返回正确计算结果；`/agy browser` 在 WSL 连接独立的临时 Chromium，通过页面渲染读回随机值。浏览器功能需要同一运行环境具有可连接的 Chrome；本次测试使用独立浏览器资料目录。[原生计时器](https://antigravity.google/docs/commands/schedule) · [原生浏览器要求](https://antigravity.google/docs/commands/browser)
 
 双子代理验收在一个独立工作区完成。测试用原生工具钩子将直接创建数限制为两个，并记录两个不同的子会话 ID。两人各自读取一份随机文件并向父会话发回消息。在首次观察窗口中父会话没有给出合并回复；恢复同一会话并追问后，父会话正确返回了两份校验词。真实 dsh-TUI 已显示父会话的合并结果；在 `/agy team` 中分别点开两个 ID，均读到对应子代理的工具记录和正确回复。此流程只创建了两个子代理。子代理预览依据 agy 1.5.13 的本机日志格式；若原生格式发生变化，面板可能无法列出子会话。[官方会话日志位置](https://antigravity.google/docs/hooks)
 
@@ -73,6 +73,6 @@ DSH_HOME=/path/to/test-dsh uv run --no-project --with pyte --with pexpect test/t
 | 第三方模型 | 当前客户端只展示 agy 向它公布的模型。官方明确限定哪些 ACP 编辑器可用第三方模型。[官方客户端与模型范围](https://antigravity.google/docs/ide/extensions/acp) |
 | 终端专属交互 | 语音、CLI 状态栏、终端标题、原生任务监视器和完整子代理管理器等依赖原生终端、后台服务或特定 UI。本机可通过 `/agy commands` 查看会话实际上报的命令。可以查看计时器及子代理活动和直接子代理记录。原生任务的逐项停止、子代理消息单独投递、产物逐行批注和快捷键跳转外部编辑器仍用原生 CLI。原生 `/btw` 的独立临时问答和 `/context` 的详细分类均未通过 ACP 提供，宿主只能展示 ACP 实际推送的上下文总量。搜代码面板提供匹配预览。 |
 | 配置编辑与集成 | 界面可编辑上表的五个全局字段及权限规则。原生 `--remote-agent` 和 `--project` 没有对应的本机 ACP 启动选项。其他高级配置和 hook 编写仍用原生入口。插件不维护第二套账户、配额、任务或历史数据库。 |
-| 仍待验证 | 授权失效后的真实恢复、跨平台、多账号端到端及大规模历史。历史回放可重建 ACP 返回的图片字节；本机 agy 1.5.13 的真实图片对话在恢复时未返回原图，旧图片只在提供字节时可见。动态出现的 ACP 命令只表示原生可调用，一次性定时器、读取本地网页和单步动态工作流已有实测。重复 cron、远程业务网页及长期运行的大型工作流尚未逐项实测。 |
+| 仍待验证 | 授权失效后的真实恢复、跨平台、多账号端到端及大规模历史。历史回放可重建 ACP 返回的图片字节；本机 agy 1.5.13 的真实图片对话在恢复时未返回原图，旧图片只在提供字节时可见。动态出现的 ACP 命令只表示原生可调用，一次性定时器、限定两次的重复 cron、读取本地网页和单步动态工作流已有实测。远程业务网页及长期运行的大型工作流尚未逐项实测。 |
 
 对标参考为 [dsh-TUI v0.20.2 的 Codex 后端](https://github.com/ccch1mneyyy/dsh-TUI/blob/v0.20.2/docs/codex-backend.md)、[宿主后端插件契约](https://github.com/ccch1mneyyy/dsh-TUI/tree/v0.20.2/scripts/fixtures/third-party-backend) 和 [Antigravity 官方配额面板](https://antigravity.google/docs/cli/commands/usage)。
