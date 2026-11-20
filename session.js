@@ -52,7 +52,7 @@ export class Session {
       questions: this.panels.questions,
       mcp: mcpControl(cwd),
       auth: {
-        status: async () => ({ lines: [this.needsLogin ? '需要 Google 授权' : '使用 agy 本机登录'] }),
+        status: async () => ({ lines: [this.authHint ?? '使用 agy 本机登录'] }),
         login: () => this.login(),
         reconnect: () => this.reconnect(),
       },
@@ -124,20 +124,22 @@ export class Session {
   }
 
   elicit(request, signal) {
-    if (request.sessionId !== this.id || this.disposing || this.cancelling) return { action: 'cancel' }
+    if (this.authHint || request.sessionId !== this.id || this.disposing || this.cancelling) return { action: 'cancel' }
     return elicit(this.panels, request, signal)
   }
 
   enterLogin(target) {
     this.needsLogin = true
+    this.authHint = '运行 /login 登录已有 Google 账号。'
     this.loginTarget = target
     this.ref = { backendId: 'antigravity', sessionId: 'signin-' + randomUUID() }
     this.status = 'idle'
-    this.openingEvents = [{ type: 'notice', level: 'info', text: '运行 /login 登录已有 Google 账号。' }]
+    this.openingEvents = [{ type: 'notice', level: 'info', text: this.authHint }]
   }
 
   async reconnect(directories = this.directories, checkAccount = true) {
     if (!this.id || this.needsLogin) return
+    if (!checkAccount && this.authHint) throw new Error(this.authHint)
     let attached = false, catalog
     const next = await this.connectAgent(directories, u => {
       if (attached) this.update(u)
@@ -162,11 +164,12 @@ export class Session {
       this.configureAccount(data)
       this.configure(data.configOptions ?? [])
       this.rpc = next
+      this.authHint = undefined
       attached = true
       this.update(catalog ?? { sessionUpdate: 'available_commands_update', availableCommands: [] })
       this.directories = directories
       this.watchConnection(next)
-      await old.close()
+      await old?.close()
     } catch (error) {
       await next.close()
       throw error
@@ -183,12 +186,20 @@ export class Session {
       // host acquire the real session lock instead of reusing a stand-in.
       if (this.needsLogin) {
         const resume = this.loginTarget?.kind === 'resume'
-        this.emit({ type: 'notice', level: 'info', text: resume
-          ? '已登录，请从会话选择器恢复原会话。' : '已登录。运行 /new 开始 Antigravity 会话。' })
+        this.authHint = resume ? '已登录，请从会话选择器恢复原会话。' : '已登录。运行 /new 开始 Antigravity 会话。'
+        this.emit({ type: 'notice', level: 'info', text: this.authHint })
       } else {
-        this.authChanged = true
+        // The native credential has already changed. Retire the previous
+        // process even when the new credential cannot restore this session.
+        this.authHint = 'Google 授权已完成。请运行 /new 或从会话选择器进入可用的原生会话。'
+        const old = this.rpc
+        this.rpc = undefined
+        this.dismiss()
+        this.configure([])
+        delete this.capabilities.account
+        delete this.capabilities.context
+        await old?.close()
         await this.reconnect()
-        this.authChanged = false
         this.emit({ type: 'notice', level: 'info', text: 'Google 授权完成，会话已重新连接。' })
       }
     } catch (e) {
@@ -212,7 +223,8 @@ export class Session {
 
   async showAction(name, action, argument) {
     if (name === 'artifacts' || name === 'team') {
-      if (this.needsLogin || this.authChanged || !this.id) throw new Error('请先登录并进入正式会话。')
+      if (this.authHint) throw new Error(this.authHint)
+      if (!this.id) throw new Error('请先登录并进入正式会话。')
       const view = name === 'team' ? viewTeam : viewArtifacts
       return view(this.id, this.panels, action.signal)
     }
@@ -223,7 +235,8 @@ export class Session {
   }
 
   async editFolders(action) {
-    if (this.needsLogin || !this.id) throw new Error('请先登录并进入会话。')
+    if (this.authHint) throw new Error(this.authHint)
+    if (!this.id) throw new Error('请先登录并进入会话。')
     const signal = action.signal
     const choice = await this.panels.ask([{ header: '工作目录', question: '当前会话的附加工作目录',
       detail: [this.cwd, ...this.directories].join('\n'), options: [{ label: '关闭' }, { label: '添加目录' },
@@ -249,6 +262,7 @@ export class Session {
   }
 
   async report(name, signal) {
+    if (this.authHint && ['account', 'native', 'tasks', 'diff', 'commands'].includes(name)) return { text: this.authHint }
     if (name === 'account') {
       const info = await this.capabilities.account?.info()
       return { text: (info?.subscription ? '套餐 · ' + info.subscription : '当前会话未提供套餐信息') +
@@ -374,6 +388,7 @@ export class Session {
     }
   }
   async setOption(id, value) {
+    if (this.authHint) throw new Error(this.authHint)
     if (!this.choices(id).some(o => o.id === value)) throw new Error('Unavailable Antigravity option')
     const result = await this.rpc.request('session/set_config_option', { sessionId: this.id, configId: id, value }, deadline())
     this.configure(result.configOptions)
@@ -452,7 +467,7 @@ export class Session {
     }
   }
   update(u) {
-    if (this.status === 'disposed') return
+    if (this.status === 'disposed' || this.authHint) return
     const messageChunk = u.sessionUpdate === 'agent_message_chunk' || u.sessionUpdate === 'agent_thought_chunk'
     if (messageChunk || u.sessionUpdate === 'tool_call' || u.sessionUpdate === 'tool_call_update') this.flushReplayUser()
     if (messageChunk && u.messageId && u.messageId !== this.messageId) {
@@ -550,7 +565,7 @@ export class Session {
   }
 
   permission({ sessionId, toolCall, options }, signal) {
-    if (sessionId !== this.id || this.status === 'disposed' || this.cancelling || signal?.aborted) return cancelled()
+    if (this.authHint || sessionId !== this.id || this.status === 'disposed' || this.cancelling || signal?.aborted) return cancelled()
     const kinds = { allow_once: 'allow-once', allow_always: 'allow-always', reject_once: 'reject' }
     const choices = options.filter(o => kinds[o.kind]).map(o => ({ id: o.optionId, label: o.name, kind: kinds[o.kind] }))
     if (!choices.some(o => o.kind === 'reject')) choices.unshift({ id: '', label: 'Cancel', kind: 'reject' })
@@ -619,6 +634,7 @@ export class Session {
       }).finally(() => { this.localAction = undefined })
       return { accepted: true }
     }
+    if (this.authHint) return { accepted: false, dropped: true, reason: this.authHint }
     if (/^\/agy\s/.test(text)) {
       const command = name.split(/\s+/, 1)[0]
       if (!(command === 'plan' && this.capabilities.modes) && !this.nativeCommands.some(c => c.name === command)) return { accepted: false, dropped: true, reason: '当前 agy 未提供此命令。输入 /agy 查看可用面板。' }
@@ -634,7 +650,6 @@ export class Session {
       }
       input = { ...input, text: argument, blocks: [{ type: 'text', text: argument }, ...(input.blocks?.slice(1) ?? [])] }
     }
-    if (this.needsLogin || this.authChanged) return { accepted: false, dropped: true, reason: '请使用 /login 登录，再用 /new 或会话选择器进入原生会话。' }
     if (this.status === 'running' && placement === 'steer' && this.acceptSteers && !this.cancelling) {
       const steered = this.steer(input)
       this.steers.add(steered)
@@ -689,9 +704,9 @@ export class Session {
       }
     } catch (e) {
       if (e.code === -32000 || /unauthenticated|authentication required/i.test(e.message)) {
-        this.authChanged = true
+        this.authHint = 'agy 需要重新授权。请运行 /login，然后继续会话。'
         this.clearQueue('dropped')
-        reason = { kind: 'error', message: 'agy 需要重新授权。请运行 /login，然后继续会话。' }
+        reason = { kind: 'error', message: this.authHint }
       } else reason = { kind: 'error', message: e.message }
     }
     finally {

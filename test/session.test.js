@@ -232,3 +232,47 @@ test('native artifact references and embedded resources survive transcript proje
   assert.equal(events.find(e => e.type === 'assistant.message').blocks[0].text, 'Plan · file:///test/plan.md')
   assert.equal(events.find(e => e.type === 'tool.result').text, 'example:notes\nnotes')
 })
+
+test('authorized account without the old conversation retires the old process and directs the user to /new', async t => {
+  const s = await start(t)
+  const previous = s.rpc
+  process.env.AGY_FIXTURE_EMPTY_CATALOG = '1'
+  t.after(() => { delete process.env.AGY_FIXTURE_EMPTY_CATALOG })
+  const prompt = observe(s, 'question.request')
+  const signingIn = s.capabilities.auth.login()
+  s.capabilities.questions.respond((await prompt).request.requestId, { answers: [{ selected: [], custom: 'fixture-code' }] })
+  await signingIn
+  await previous.closed
+  assert.equal(s.rpc, undefined)
+  assert.equal(s.status, 'idle')
+  assert.match((await s.report('account')).text, /授权已完成.*\/new/)
+  assert.equal((await s.submit({ text: '/plan', clientMessageId: 'mode' })).accepted, false)
+  assert.match((await s.submit({ text: 'hello', clientMessageId: 'work' })).reason, /\/new/)
+  await assert.rejects(s.reconnect([], false), /\/new/)
+})
+
+test('successful first login keeps the placeholder and gives the host new-session instructions', async t => {
+  process.env.AGY_FIXTURE_SIGNIN = '1'
+  t.after(() => { delete process.env.AGY_FIXTURE_SIGNIN })
+  const s = await start(t)
+  const prompt = observe(s, 'question.request')
+  const signingIn = s.capabilities.auth.login()
+  s.capabilities.questions.respond((await prompt).request.requestId, { answers: [{ selected: [], custom: 'fixture-code' }] })
+  await signingIn
+  assert.match((await s.capabilities.auth.status()).lines[0], /已登录.*\/new/)
+  assert.match((await s.submit({ text: 'hello', clientMessageId: 'early' })).reason, /已登录.*\/new/)
+})
+
+test('a failed native callback closes the code field, reports failure and leaves the original connection usable', async t => {
+  process.env.AGY_FIXTURE_CALLBACK = 'failed'
+  t.after(() => { delete process.env.AGY_FIXTURE_CALLBACK })
+  const s = await start(t)
+  const previous = s.rpc
+  const notice = observe(s, 'notice', e => e.level === 'error')
+  await s.capabilities.auth.login()
+  assert.match((await notice).text, /重新运行 \/login/)
+  assert.equal(s.rpc, previous)
+  assert.equal(s.panels.pending.size, 0)
+  assert.ok((await s.submit({ text: 'hello', clientMessageId: 'same' })).accepted)
+  await s.active
+})

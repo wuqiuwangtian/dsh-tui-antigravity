@@ -9,7 +9,7 @@ if (process.argv[2] === 'remote-control') {
 }
 if (process.argv.includes('--login')) {
   console.log('https://accounts.google.com/o/oauth2/auth?test=1')
-  if (process.env.AGY_FIXTURE_CALLBACK) setTimeout(() => process.exit(0), 100)
+  if (process.env.AGY_FIXTURE_CALLBACK) setTimeout(() => process.exit(process.env.AGY_FIXTURE_CALLBACK === 'failed' ? 1 : 0), 100)
   for await (const code of createInterface({ input: process.stdin })) process.exit(code === 'fixture-code' ? 0 : 1)
   process.exit(1)
 }
@@ -28,6 +28,7 @@ for await (const line of createInterface({ input: process.stdin })) {
   switch (method) {
     case 'initialize': send({ id, result: { protocolVersion: 1, agentCapabilities: {}, authMethods: [] } }); break
     case 'session/list':
+      if (process.env.AGY_FIXTURE_EMPTY_CATALOG) { send({ id, result: { sessions: [] } }); break }
       send({ id, result: { sessions: [{ sessionId, cwd: process.cwd(), title: 'fixture' },
         { sessionId: 'foreign', cwd: '/another-project', title: 'other' }] } })
       break
