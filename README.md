@@ -1,20 +1,59 @@
 # dsh-tui-antigravity
 
-目标是在 dsh-TUI 内选择 Google Antigravity 内核，沿用熟悉的输入框、工具卡片、审批和会话选择器，并让本机 Antigravity CLI 执行回合、管理登录和会话。当前仓库处于调研阶段，仅含计划。
+目标是在 dsh-TUI 内选择 Google Antigravity 内核，沿用熟悉的输入框、工具卡片、审批和会话选择器，并让本机 Antigravity CLI 执行回合、管理登录和会话。当前为可从本地源码安装的实验性后端，已在 WSL 的真实终端完成核心流程验证。
+
+## 使用
+
+前提是本机已有 dsh-TUI 0.20.2、支持 ACP 的 agy 和 Node.js。需要登录时，在外部终端运行 `agy acp --login`。以下命令会将源码目录链接到当前 dsh-tui profile，移动目录后需重新安装。
+
+```sh
+cd /home/wqwt/code/dsh-tui-antigravity
+npm ci
+dsh plugin --profile dsh-tui add "$PWD"
+dsh-tui --backend antigravity
+```
+
+启动参数可省略，启动页或聊天中的 `/kernel` 可选择 Antigravity。选中后使用原有输入框、审批弹窗与工具卡片。可通过 `ANTIGRAVITY_EXECUTABLE` 指定 agy 的可执行文件。版本升级后重启宿主。卸载命令为 `dsh plugin --profile dsh-tui remove dsh-tui-antigravity`。
+
+退出时可从恢复命令读取会话 ID，后端诊断也提供该 ID。先正常退出当前前端，再在原工作目录运行 `agy --conversation <id>` 或 `dsh-tui --backend antigravity --resume <id>`。最近使用的 ID 由插件写入宿主分配的后端目录。原生聊天记录由 agy 管理。
+
+## 对标结果
+
+本机组合为 dsh-TUI 0.20.2、agy 1.5.9。开发测试使用单独的 DSH profile 和临时工作区，真实模型测试复用本机 CLI 登录，会产生原生测试会话。
+
+| 能力 | 结果及证据 |
+| --- | --- |
+| 加载与真实聊天 | 在临时 profile 安装后从启动参数进入真实 TUI，/kernel 列出 Antigravity 和 Codex。安装期间及卸载插件后分别用 Codex 完成真实回合。缺少 agy 时探测报告未安装；在无凭据的独立 HOME 中真实启动后提示通过 agy acp --login 登录。 |
+| 工具与审批 | 已验证工作区内写文件，以及在工作区外的专用测试目录触发审批。在 TUI 选 Deny 后目标文件仍不存在，同一会话可继续。另一次显式选 Allow 后核实文件内容。默认工作区写入可由 agy 自行放行。[官方权限规则](https://antigravity.google/docs/permissions) |
+| 中断、掉线、排队 | 在真实界面中按 Esc 中断，再提交计算题并核对回答。可控 ACP 进程覆盖运行中取消、队列撤回、保留下一条输入、审批时关闭和子进程崩溃。回合内即时引导尚无对等接口。 |
+| 会话恢复 | 已验证 TUI → 官方 CLI → TUI 的同 ID 续聊，并核对新增历史和原工作目录。实测 agy 列表可能夹带其他目录的数据，插件按 cwd 再筛一次。无效 ID 的 load 可能返回成功，恢复前先查原生目录。列举支持游标分页。跨官方 CLI 并发写入保护仍待验证，应先退出正在操作同一会话的前端。 |
+| 模型、模式、思考强度 | 真实 ACP 会话返回模型表、模型对应的强度选项，以及 default、accept-edits、auto、plan。已验证切换模型、强度、计划模式并读回。切换成功以服务端响应为准。 |
+| 图片与用量 | 实测将蓝色图片作为附件发送，模型正确识别颜色。已有本轮 token 用量和原生上下文用量事件映射。历史图片回放、真实剪贴板交互仍待补齐。 |
+| 会话维护 | 本机 ACP 对 `session/fork`、`session/set_info`、`session/delete`、`session/archive` 均返回 -32601。官方交互 CLI 的命令菜单实测提供 `/fork` 和 `/rename`，`/resume` 浏览器提示 F2 Rename、F4 Delete。删除只核对入口。Codex 浏览器的 Ctrl+D 是归档，两者的数据保留语义不同。上述操作需切回官方 CLI。[官方分叉指南](https://antigravity.google/docs/cli/conversations/) |
+| 其他 Codex 能力 | 尚缺从 TUI 发起原生回滚、旁问、结构化提问、子代理与后台任务管理、持续目标、MCP 管理、完整登录面板和渠道管理。agy 提供外部登录及 `agy mcp` 管理命令。hook 由原生运行时处理，TUI 事件展示未验证。ACP 的斜杠命令目录按会话上报，本机恢复测试返回空列表。 |
+| 验证边界 | 已登录账号的 WSL 路径已实测。登录失效后的真实恢复、多账号、跨平台、跨版本升级、超长历史和所有 Codex 进阶能力仍未通过验收。 |
+
+本项目采用用户确认的原生语义。官方 CLI 有专属入口时提供切换路径，其余缺口列在上表。除宿主的最近会话标记以外，目录和历史以 agy 为准。
+
+## 复现验证
+
+- `npm ci && npm test` 使用本地假 ACP 子进程，无需登录。覆盖审批选择回传、拒绝后续聊、队列、异常退出、目录范围和无效恢复。
+- `node test/live.mjs` 需已登录，消耗两个真实模型回合。脚本在临时目录创建会话、写入随机记忆码、用官方 CLI 恢复并取回该码，再用插件检查历史及目录。成功后输出 PASS。临时工作目录由脚本清理，原生测试会话由 agy 保存。
+- 手动验收时，在临时工作目录启动上面的后端，指定工作区外、自己控制的空目录，让模型创建一个测试文件。选择拒绝后检查文件，再在同一会话发送新问题。是否出现审批取决于 agy 原有权限规则。
 
 ## 已核实的基线 · 2026-11-20
 
 - 本机 `dsh-tui --version` 显示 launcher 和 profile 均为 0.20.2。对应上游为 `ccch1mneyyy/dsh-TUI`，标签 v0.20.2 指向 `55b33aea793f34e3cab48a5579f3e7595031e72e`。以这个发布版的 Codex 后端作为验收参照。本机另有较早的开发工作树。[Codex 后端说明](https://github.com/ccch1mneyyy/dsh-TUI/blob/v0.20.2/docs/codex-backend.md)
 - 宿主支持通过 profile bundle 注册 `tui.dsh/v1alpha1` 的 `Backend`。包根目录的 `dsh-plugin.json` 声明后端，包入口导出 `backend`。上游示例覆盖安装、授权、发现和卸载，到选择器为止，其 `open()` 会拒绝创建会话。[上游第三方后端示例](https://github.com/ccch1mneyyy/dsh-TUI/tree/v0.20.2/scripts/fixtures/third-party-backend)
-- 本机 `agy --version` 为 1.5.9，`agy acp --help` 确认支持 stdio。ACP 是前端与智能体之间的双向协议。前端能发送输入，也能接收工具状态、文件差异和审批请求。Google 支持由客户端启动 `agy acp` 子进程，并复用 CLI 登录。本轮只核对版本和帮助，账号状态、握手、模型和真实回合均待实测。[Google ACP 文档](https://antigravity.google/docs/cli/acp/) · [客户端集成指南](https://antigravity.google/docs/ide/extensions/acp)
+- 本机 `agy --version` 为 1.5.9，`agy acp --help` 确认支持 stdio。ACP 是前端与智能体之间的双向协议。前端能发送输入，也能接收工具状态、文件差异和审批请求。Google 支持由客户端启动 `agy acp` 子进程，并复用 CLI 登录。握手、原生登录复用及真实模型回合已经验证。[Google ACP 文档](https://antigravity.google/docs/cli/acp/) · [客户端集成指南](https://antigravity.google/docs/ide/extensions/acp)
 
-## 建议架构
+## 实现架构
 
-优先做独立后端 bundle。正常入口拟为启动页内核选择器、`/kernel` 和 `dsh-tui --backend antigravity`。宿主负责交互与渲染，插件负责启动和回收进程、关联请求与会话、翻译事件、传回用户决定，agy 负责执行工具及管理原生状态。独立发布可跟随现有 TUI 升级，也便于在临时 profile 里并排验证 Codex。若宿主的公开接口缺失关键能力，记录具体入口、最小复现和所需宿主改动，再决定是否维护宿主补丁。
+采用独立后端 bundle。入口为启动页内核选择器、`/kernel` 和 `dsh-tui --backend antigravity`。宿主负责交互与渲染，插件负责启动和回收进程、关联请求与会话、翻译事件、传回用户决定，agy 负责执行工具及管理原生状态。独立发布可跟随现有 TUI 升级，也便于在临时 profile 里并排验证 Codex。若宿主的公开接口缺失关键能力，记录具体入口、最小复现和所需宿主改动，再决定是否维护宿主补丁。
 
 ## Codex 对标验收表
 
-下列各项是待验证的交付要求。正式开工后按 v0.20.2 Codex 文档逐项记载宿主入口、agy 版本、协议能力、实测结果及差距。核心流程有缺口时保留阻塞状态。进阶能力若无公开接口，附证据和用户影响，由项目所有者决定是否接受例外。
+下列各项是项目最初的交付要求。按 v0.20.2 Codex 文档逐项记载宿主入口、agy 版本、协议能力、实测结果及差距。核心流程有缺口时保留阻塞状态。进阶能力若无公开接口，附证据和用户影响，由项目所有者决定是否接受例外。
 
 | 场景 | 通过条件 |
 | --- | --- |
@@ -33,4 +72,4 @@
 3. **补齐原生会话与控制。** 接入会话目录、历史、跨前端恢复和配置选项。按验收表核实目录隔离、并发和断线后状态，保留可复现的失败案例。
 4. **逐项对标与发布判断。** 用同一个小仓库在两个内核分别执行同一任务，保存脱敏测试记录。输出逐项对照结果、尚存差距和复现步骤。达到目标或用户明确接受具体差异后，再决定首版发布范围。
 
-本轮仅初始化仓库和准备计划。首个开发阶段需另行启动。
+第 1 项已验证独立插件可行。第 2、3 项的日常路径已落地。第 4 项的剩余差距见上方「对标结果」。后续优先验证登录失效、审批期间异常断线以及不同客户端对同一会话的写入保护。

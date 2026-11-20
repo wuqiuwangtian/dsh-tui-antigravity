@@ -1,0 +1,57 @@
+{
+  "$schema": "urn:dsh-std:community-draft:dsh-plugin:0.15",
+  "manifestVersion": "0.15",
+  "id": "io.github.wuqiuwangtian.antigravity",
+  "name": "Antigravity Backend",
+  "version": "0.1.0",
+  "facets": {
+    "host": {
+      "entry": "backend.js",
+      "apiVersion": "v1alpha1"
+    }
+  },
+  "requires": {
+    "contracts": []
+  },
+  "permissions": [],
+  "contributes": {
+    "commands": [],
+    "x-dsh-tui": [
+      {
+        "apiVersion": "tui.dsh/v1alpha1",
+        "kind": "Backend",
+        "id": "io.github.wuqiuwangtian.antigravity",
+        "name": "antigravity_backend",
+        "spec": {
+          "id": "antigravity",
+          "label": {
+            "text": "Antigravity"
+          },
+          "shortLabel": "Antigravity",
+          "product": "agy",
+          "capabilities": [
+            "native",
+            "diagnostics",
+            "pendingRetraction",
+            "permissions",
+            "models",
+            "effort",
+            "modes",
+            "commands",
+            "context",
+            "images"
+          ],
+          "grants": [],
+          "confirmation": {
+            "policy": "confirm"
+          }
+        }
+      }
+    ]
+  },
+  "subscriptions": [],
+  "license": "UNLICENSED",
+  "source": {
+    "repository": "https://github.com/wuqiuwangtian/dsh-tui-antigravity"
+  }
+}

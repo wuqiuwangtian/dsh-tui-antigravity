@@ -1,0 +1,27 @@
+{
+  "name": "dsh-tui-antigravity",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./backend.js"
+  },
+  "files": [
+    "backend.js",
+    "session.js",
+    "connection.js",
+    "dsh-plugin.json",
+    "cordis.patch.yml"
+  ],
+  "scripts": {
+    "test": "node --test test/*.test.js"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "dependencies": {
+    "@agentclientprotocol/sdk": "2.8.0"
+  }
+}
