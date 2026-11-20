@@ -547,27 +547,32 @@ export class Session {
     if (this.localAction) return { accepted: false, dropped: true, reason: '请先完成或关闭当前面板。' }
     let text = input.text.trim()
     const name = text.replace(/^\/agy\s+/, '/').slice(1)
-    if (['/agy login', '/signin'].includes(text) && this.status === 'idle') {
+    const search = /^\/(?:agy\s+)?(?:codesearch|cs)(?:\s+([\s\S]*))?$/.exec(text)
+    const panel = search ? 'codesearch' : name
+    const localPanel = search || text === '/artifacts' || (text.startsWith('/agy ') && Object.hasOwn(actionLabels, panel))
+    const signIn = text === '/agy login' || text === '/signin'
+    if (this.status !== 'idle' && text.startsWith('/') &&
+        (localPanel || signIn || text === '/agy' || Object.hasOwn(reportLabels, name))) {
+      return { accepted: false, dropped: true, reason: '请先结束当前回合，再打开 Antigravity 面板。' }
+    }
+    if (signIn) {
       this.pending({ claimed: [input.clientMessageId] })
       void this.login()
       return { accepted: true }
     }
-    if (text === '/agy' && this.status === 'idle') {
+    if (text === '/agy') {
       this.pending({ claimed: [input.clientMessageId] })
       this.localAction = new AbortController()
       void this.showMenu(this.localAction)
       return { accepted: true }
     }
-    if (input.text.trim().startsWith('/') && Object.hasOwn(reportLabels, name) && this.status === 'idle') {
+    if (text.startsWith('/') && Object.hasOwn(reportLabels, name)) {
       this.pending({ claimed: [input.clientMessageId] })
       this.localAction = new AbortController()
       void this.showReport(name, this.localAction)
       return { accepted: true }
     }
-    const search = /^\/(?:agy\s+)?(?:codesearch|cs)(?:\s+([\s\S]*))?$/.exec(text)
-    const panel = search ? 'codesearch' : name
-    const localPanel = search || text === '/artifacts' || (text.startsWith('/agy ') && Object.hasOwn(actionLabels, panel))
-    if (localPanel && this.status === 'idle') {
+    if (localPanel) {
       this.pending({ claimed: [input.clientMessageId] })
       const action = new AbortController()
       this.localAction = action

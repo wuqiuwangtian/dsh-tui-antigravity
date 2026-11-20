@@ -168,3 +168,13 @@ test('a native browser callback completes the sign-in while the code field is st
   assert.notEqual(s.rpc, previous)
   assert.equal(s.panels.pending.size, 0)
 })
+
+test('local account and quota commands cannot become queued messages or model steering', async t => {
+  const s = await start(t)
+  assert.ok((await s.submit({ text: 'wait', clientMessageId: 'turn' })).accepted)
+  for (const text of ['/usage', '/agy account', '/agy folders', '/codesearch needle', '/signin']) {
+    assert.equal((await s.submit({ text, clientMessageId: 'panel' }, 'followup')).accepted, false)
+  }
+  assert.equal(s.queue.length, 0)
+  await s.cancel('user')
+})
