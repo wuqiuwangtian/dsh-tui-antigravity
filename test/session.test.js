@@ -13,6 +13,12 @@ function observe(session, type, match = () => true) {
   })
 }
 async function start(t) {
+  const previousBrowser = process.env.BROWSER
+  process.env.BROWSER = 'true'
+  t.after(() => {
+    if (previousBrowser === undefined) delete process.env.BROWSER
+    else process.env.BROWSER = previousBrowser
+  })
   process.env.ANTIGRAVITY_EXECUTABLE = fileURLToPath(new URL('./agent.mjs', import.meta.url))
   const s = await backend.open({ kind: 'create', cwd: process.cwd() }, {})
   t.after(() => s.dispose())

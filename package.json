@@ -17,6 +17,7 @@
     "reports.js",
     "panels.js",
     "login.js",
+    "desktop.js",
     "forms.js",
     "mcp.js",
     "management.js",

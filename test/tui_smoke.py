@@ -8,6 +8,7 @@ import shlex
 import shutil
 import tempfile
 import time
+from urllib.parse import urlsplit
 
 import pexpect
 import pyte
@@ -23,9 +24,24 @@ if not native:
 def run(work, test_home, executable, scenario, marker=None):
     env = dict(os.environ, DSH_HOME=str(profile), HOME=str(test_home),
                TERM="xterm-256color", ANTIGRAVITY_EXECUTABLE=str(executable))
+    if scenario == "accounts":
+        env.update(AGY_FIXTURE_IDENTITIES=str(test_home / "account"), BROWSER="true")
+    if scenario == "login":
+        # Record desktop dispatches without opening an OAuth page during tests.
+        log = test_home / "launches"
+        browser = test_home / "record-browser"
+        browser.write_text("#!/bin/sh\nprintf '%s\\n' \"$1\" >> " + shlex.quote(str(log)) + "\n")
+        browser.chmod(0o700)
+        env["BROWSER"] = str(browser)
+        clipboard = test_home / "clipboard"
+        for tool in ("clip.exe", "pbcopy", "wl-copy"):
+            helper = test_home / tool
+            helper.write_text("#!/bin/sh\ncat > " + shlex.quote(str(clipboard)) + "\n")
+            helper.chmod(0o700)
+        env["PATH"] = str(test_home) + os.pathsep + env["PATH"]
     p = pexpect.spawn("dsh-tui", ["--backend", "antigravity"], cwd=str(work), env=env,
-                      dimensions=(45, 150), encoding="utf-8", codec_errors="replace")
-    screen = pyte.Screen(150, 45)
+                      dimensions=(24, 80) if scenario == "login" else (45, 150), encoding="utf-8", codec_errors="replace")
+    screen = pyte.Screen(80, 24) if scenario == "login" else pyte.Screen(150, 45)
     stream = pyte.Stream(screen)
 
     def wait(label, seconds=35):
@@ -39,6 +55,12 @@ def run(work, test_home, executable, scenario, marker=None):
                 return
         raise AssertionError("Missing UI label: " + label)
 
+    def send(text):
+        p.send(text)
+        time.sleep(0.35)
+        p.send("\r")
+        time.sleep(0.35)
+
     def choose(index):
         for _ in range(index):
             p.send("\x1b[B")
@@ -50,7 +72,7 @@ def run(work, test_home, executable, scenario, marker=None):
         wait("Antigravity")
         time.sleep(3)
         commands = {
-            "config": "/agy config", "usage": "/usage", "login": "/login",
+            "config": "/agy config", "usage": "/usage", "login": "/login", "accounts": "/login",
             "skill": "/agy parity-word",
             "timer": "/agy schedule Set a native one-shot timer for 10 seconds, then end this turn. "
                      "When it fires, read proof.txt in the current workspace with your file-reading tool. "
@@ -60,7 +82,19 @@ def run(work, test_home, executable, scenario, marker=None):
         p.send(commands[scenario])
         time.sleep(0.35)
         p.send("\r")
-        if scenario == "config":
+        if scenario == "accounts":
+            for account in ("A", "B"):
+                if account == "B":
+                    send("/login")
+                wait("复制完整授权链接")
+                # Bracketed paste also works when a link action has focus.
+                send("\x1b[200~code-" + account + "\x1b[201~")
+                wait("已登录。运行 /new" if account == "A" else "原会话")
+                send("/new")
+                time.sleep(1)
+                send("identify")
+                wait("CONFIRMED-ACCOUNT-" + account)
+        elif scenario == "config":
             wait("编辑全局设置")
             choose(2)
             wait("选择要编辑的字段")
@@ -81,8 +115,22 @@ def run(work, test_home, executable, scenario, marker=None):
                 time.sleep(0.35)
                 p.send("\r")
                 wait("计时器 · 已完成")
+        elif scenario == "login":
+            wait("一次性授权码")
+            wait("https://accounts.google.com/")
+            wait("复制完整授权链接")
+            wait("重新打开浏览器")
+            first = log.read_text().splitlines()
+            assert len(first) == 1 and urlsplit(first[0]).hostname == "accounts.google.com"
+            choose(0)
+            wait("已复制链接")
+            assert clipboard.read_text() == first[0]
+            choose(1)
+            wait("已再次请求打开浏览器")
+            assert log.read_text().splitlines() == [first[0], first[0]]
+            p.send("\x1b")
         else:
-            wait("一次性授权码" if scenario == "login" else "剩余")
+            wait("剩余")
             p.send("\x1b")
         print("PASS: real dsh-TUI " + scenario, flush=True)
     finally:
@@ -90,8 +138,10 @@ def run(work, test_home, executable, scenario, marker=None):
 
 
 args = argparse.ArgumentParser()
+args.add_argument("--accounts", action="store_true", help="exercise account switching with two fixture identities")
+args.add_argument("--login", action="store_true", help="only check the sign-in screen with an isolated home")
 args.add_argument("--workflows", action="store_true", help="exercise an authenticated custom skill and a one-shot timer")
-workflows = args.parse_args().workflows
+options = args.parse_args()
 with tempfile.TemporaryDirectory(prefix="agy-tui-smoke-") as temp:
     root = Path(temp)
     # Only the agy process uses the current login for read-only quota/config.
@@ -100,7 +150,14 @@ with tempfile.TemporaryDirectory(prefix="agy-tui-smoke-") as temp:
     wrapper.write_text("#!/bin/sh\nexport HOME=" + shlex.quote(str(Path.home())) +
                        "\nexec " + shlex.quote(native) + ' "$@"\n')
     wrapper.chmod(0o700)
-    for mode in (("skill", "timer") if workflows else ("usage", "config", "login")):
+    modes = ("usage", "config", "login")
+    if options.accounts:
+        modes = ("accounts",)
+    elif options.login:
+        modes = ("login",)
+    elif options.workflows:
+        modes = ("skill", "timer")
+    for mode in modes:
         home = root / mode
         home.mkdir()
         work = root / ("work-" + mode)
@@ -113,4 +170,7 @@ with tempfile.TemporaryDirectory(prefix="agy-tui-smoke-") as temp:
                                            "When invoked, reply exactly " + marker + ".")
         if mode == "timer":
             (work / "proof.txt").write_text(marker)
-        run(work, home, native if mode == "login" else wrapper, mode, marker)
+        executable = native if mode == "login" else wrapper
+        if mode == "accounts":
+            executable = Path(__file__).resolve().with_name("agent.mjs")
+        run(work, home, executable, mode, marker)
