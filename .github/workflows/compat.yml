@@ -56,7 +56,7 @@ jobs:
         with:
           path: .compat-passed
           lookup-only: true
-          key: compat-${{ matrix.component }}-${{ github.sha }}-${{ needs.discover.outputs.plugin }}-${{ matrix.component == 'agy' && needs.discover.outputs.digest || needs.discover.outputs.host }}
+          key: compat-${{ inputs.candidate && 'candidate' || 'registry' }}-${{ matrix.component }}-${{ github.sha }}-${{ needs.discover.outputs.plugin }}-${{ matrix.component == 'agy' && needs.discover.outputs.digest || needs.discover.outputs.host }}
       - uses: actions/setup-node@v4
         if: steps.previous.outputs.cache-hit != 'true' || github.event_name == 'workflow_dispatch'
         with:
