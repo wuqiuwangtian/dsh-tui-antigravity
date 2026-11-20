@@ -22,7 +22,8 @@
     "mcp.js",
     "management.js",
     "settings.js",
-    "search.js"
+    "search.js",
+    "ui"
   ],
   "scripts": {
     "test": "node --test test/*.test.js"

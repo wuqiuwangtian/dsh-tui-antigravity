@@ -15,6 +15,14 @@ dsh-tui --backend antigravity
 
 启动页和 `/kernel` 也可选 Antigravity。可用 `ANTIGRAVITY_EXECUTABLE` 指定 CLI 的绝对路径。退出后用 `dsh plugin --profile dsh-tui remove dsh-tui-antigravity` 卸载。
 
+### Antigravity 启动页
+
+[144×52 图片终端预览](ui/previews/144x52.png) · [80×24 紧凑布局](ui/previews/80x24.png)。两张图均由真实 TUI 的 PTY 输出重建。
+
+在 WSL 运行 `sh ui/brand.sh`，重开 `dsh-tui --backend antigravity` 即可使用粉紫配色、两行像素标题和眨眼抬爪的猫娘。品牌设置选「跟随后端」；手选主题或品牌仍优先。支持终端图片的环境使用透明 PNG，纯字符终端使用同一角色的彩色半块立绘。窗口高度不足时，沿用宿主布局优先保留输入区。
+
+dsh-tui 0.20.2 的品牌映射在宿主内。脚本校验已有安装后，将配套补丁应用到当前 `DSH_HOME` 的 dsh-tui profile。运行 `sh ui/brand.sh remove` 可撤销。重装相同版本后可重新应用，升级宿主需先适配新版本。
+
 已有 agy 登录会被复用。首次登录或切换已有 Google 账号时，输入 `/login`，或在 `/agy account` 选择「登录或切换 Google 账号」。TUI 会请求系统默认浏览器打开 Google 授权页；WSL 下优先调用 Windows 的默认浏览器。首屏有可点击的 Google 链接、「复制完整授权链接」和「重新打开浏览器」，选好账号后直接粘贴回跳网址或一次性授权码即可。插件把答案经 stdin 交给本机 `agy acp --login`，由 agy 完成授权和存储。Esc 取消操作。首次成功后输入 `/new`，让宿主对正式会话 ID 加锁。切换时先结束当前回合。Google 授权成功后，插件关闭旧账号的 ACP 进程，再用新连接核对原生会话目录。如果无法恢复原会话，账号面板和输入框会提示使用 `/new` 或会话选择器。取消授权或授权失败时，可继续使用原连接。账号是本机 CLI 共享状态。[官方认证和 ACP 接口](https://antigravity.google/docs/ide/extensions/acp)
 
 ## 在 TUI 中使用
