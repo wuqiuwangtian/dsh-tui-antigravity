@@ -1,5 +1,5 @@
 // Exercises configuration writes against the official local CLI, in a temporary home.
-import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises'
+import { mkdtemp, mkdir, writeFile, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import assert from 'node:assert/strict'
@@ -15,6 +15,8 @@ const plugin = join(temp, 'plugin')
 async function select(kind, steps) {
   const answers = [...steps, '关闭']
   const panels = { async ask([question]) {
+    assert.ok(!JSON.stringify(question).includes('test-only-value'))
+    if (question.question.includes('（JSON 对象）')) assert.equal(question.secret, true)
     const entry = answers.shift()
     assert.ok(entry)
     if (!question.options.length) return [{ custom: entry, selected: [] }]
@@ -32,6 +34,14 @@ try {
   assert.equal((await mcp.status())[0].status, 'disabled')
   await select('mcp', ['已停用 · example', '移除', '确认'])
   assert.deepEqual(await mcp.status(), [])
+  const advanced = '添加带环境变量或请求头的 MCP 服务'
+  const config = async () => JSON.parse(await readFile(join(temp, '.gemini/config/mcp_config.json'), 'utf8')).mcpServers
+  await select('mcp', [advanced, 'stdio', '/usr/bin/true', '[]', '{"EXAMPLE_KEY":"test-only-value"}', '返回'])
+  assert.ok(!(await config()).stdio)
+  await select('mcp', [advanced, 'stdio', '/usr/bin/true', '[]', '{"EXAMPLE_KEY":"test-only-value"}', '确认'])
+  assert.equal((await config()).stdio.env.EXAMPLE_KEY, 'test-only-value')
+  await select('mcp', [advanced, 'api', 'http://127.0.0.1:9/mcp', '{"X-Example":"test-only-value"}', '确认'])
+  assert.equal((await config()).api.headers['X-Example'], 'test-only-value')
   await mkdir(plugin)
   await writeFile(join(plugin, 'plugin.json'), JSON.stringify({ name: 'local-test', version: '1.0.0', description: 'Test' }))
   const installed = () => JSON.parse(execFileSync(executable(), ['plugin', 'list', '--json'], { cwd: temp, encoding: 'utf8' }))

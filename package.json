@@ -9,6 +9,7 @@
   "files": [
     "backend.js",
     "artifacts.js",
+    "team.js",
     "session.js",
     "connection.js",
     "dsh-plugin.json",

@@ -178,3 +178,57 @@ test('local account and quota commands cannot become queued messages or model st
   assert.equal(s.queue.length, 0)
   await s.cancel('user')
 })
+
+test('a timer wake delivers its streamed reply and approval after the foreground prompt ends', async t => {
+  const s = await start(t)
+  await s.submit({ text: 'ready', clientMessageId: 'arm' })
+  await s.active
+  const turn = s.turn
+  const request = observe(s, 'permission.request')
+  const outcome = s.permission({ sessionId: s.id, toolCall: { toolCallId: 'wake-edit' },
+    options: [{ optionId: 'no', kind: 'reject_once', name: 'Deny' }] })
+  s.capabilities.permissions.respond((await request).request.requestId, { kind: 'reject' })
+  assert.equal((await outcome).outcome.optionId, 'no')
+  assert.equal(s.status, 'idle')
+  for (const text of ['PINK ', 'ORANGE']) {
+    s.update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text } })
+  }
+  s.update({ sessionUpdate: 'usage_update', used: 5, size: 120 })
+  const events = await s.history()
+  assert.equal(s.turn, turn)
+  assert.equal(events.filter(e => e.type === 'user.message').length, 1)
+  assert.equal(events.filter(e => e.type === 'assistant.message').at(-1).blocks[0].text, 'PINK ORANGE')
+  assert.ok((await s.submit({ text: 'next', clientMessageId: 'next' })).accepted)
+  await s.active
+})
+
+test('partial task updates retain their result, native task status and image until completion', async t => {
+  const s = await start(t)
+  const data = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII='
+  s.update({ sessionUpdate: 'tool_call', toolCallId: 'timer', name: 'schedule', status: 'in_progress', rawInput: { Prompt: 'read a file' } })
+  assert.match((await s.report('tasks')).text, /计时器 · 运行中 · read a file/)
+  s.update({ sessionUpdate: 'tool_call_update', toolCallId: 'timer', content: [
+    { type: 'content', content: { type: 'image', mimeType: 'image/png', data } },
+    { type: 'diff', path: 'timer.txt', oldText: '', newText: 'fired' },
+  ] })
+  const end = { sessionUpdate: 'tool_call_update', toolCallId: 'timer', status: 'completed' }
+  s.update(end)
+  s.update(end)
+  const events = await s.history()
+  const result = events.find(e => e.type === 'tool.result')
+  assert.equal((await result.images[0].read()).toString('base64'), data)
+  assert.equal(result.presentation.diffs[0].newText, 'fired')
+  assert.equal(events.filter(e => e.type === 'task.end').length, 1)
+  assert.match((await s.report('tasks')).text, /计时器 · 已完成/)
+})
+
+test('native artifact references and embedded resources survive transcript projection', async t => {
+  const s = await start(t)
+  s.update({ sessionUpdate: 'agent_message_chunk', content: { type: 'resource_link', name: 'Plan', uri: 'file:///test/plan.md' } })
+  s.update({ sessionUpdate: 'usage_update', used: 1, size: 100 })
+  s.update({ sessionUpdate: 'tool_call', toolCallId: 'attachment', status: 'completed',
+    content: [{ type: 'content', content: { type: 'resource', resource: { uri: 'example:notes', text: 'notes' } } }] })
+  const events = await s.history()
+  assert.equal(events.find(e => e.type === 'assistant.message').blocks[0].text, 'Plan · file:///test/plan.md')
+  assert.equal(events.find(e => e.type === 'tool.result').text, 'example:notes\nnotes')
+})

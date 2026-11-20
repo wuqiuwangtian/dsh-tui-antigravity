@@ -2,6 +2,7 @@ import { realpath, stat } from 'node:fs/promises'
 import { resolve } from 'node:path'
 import { imageSize } from 'image-size'
 import { createHash, randomUUID } from 'node:crypto'
+import { viewTeam } from './team.js'
 import { viewArtifacts } from './artifacts.js'
 import { codeSearch } from './search.js'
 import { editSetting } from './settings.js'
@@ -16,12 +17,13 @@ import { connect } from './connection.js'
 const cancelled = () => ({ outcome: { outcome: 'cancelled' } })
 const sessionReports = {
   diff: '查看本会话由 agy 报告的文件编辑',
+  tasks: '查看本会话的计时器、动态工作流和后台智能体调用',
   commands: '查看当前 ACP 会话提供的原生命令',
   account: '查看当前账号的原生套餐',
   native: '在官方 CLI 打开同一会话',
 }
 const reportLabels = { ...reports, ...sessionReports }
-const actionLabels = { ...managers, folders: '本次会话的附加目录', codesearch: '搜索当前工作区', artifacts: '预览当前会话的 Markdown 产物' }
+const actionLabels = { ...managers, team: '读取当前会话的子代理回复', folders: '本次会话的附加目录', codesearch: '搜索当前工作区', artifacts: '预览当前会话的 Markdown 产物' }
 const deadline = () => ({ signal: AbortSignal.timeout(30000) })
 
 export class Session {
@@ -209,9 +211,10 @@ export class Session {
   }
 
   async showAction(name, action, argument) {
-    if (name === 'artifacts') {
+    if (name === 'artifacts' || name === 'team') {
       if (this.needsLogin || this.authChanged || !this.id) throw new Error('请先登录并进入正式会话。')
-      return viewArtifacts(this.id, this.panels, action.signal)
+      const view = name === 'team' ? viewTeam : viewArtifacts
+      return view(this.id, this.panels, action.signal)
     }
     if (name === 'folders') return this.editFolders(action)
     if (name === 'codesearch') return codeSearch(this.cwd, this.panels, action.signal, argument)
@@ -259,6 +262,11 @@ export class Session {
         '返回 dsh-TUI 时，退出 agy 后运行', 'dsh-tui --backend antigravity --resume ' + quote(this.id)].join('\n') }
     }
     if (name === 'commands') return { text: this.nativeCommands.map(c => '/agy ' + c.name + '  ' + c.description).join('\n') || '当前会话尚未上报原生命令。' }
+    if (name === 'tasks') {
+      const status = { pending: '等待中', in_progress: '运行中', completed: '已完成', failed: '失败' }
+      const rows = [...this.tools.values()].filter(call => call.task)
+      return { text: rows.reverse().map(call => [call.task.label, status[call.status], call.task.description].filter(Boolean).join(' · ')).join('\n') || '当前会话没有收到计时器、动态工作流或后台智能体调用。' }
+    }
     if (name === 'diff') {
       const changes = []
       for (const event of this.events) {
@@ -361,7 +369,7 @@ export class Session {
     }
     if (this.option('mode')) this.capabilities.modes = {
       current: () => this.option('mode').currentValue, list: () => this.choices('mode'),
-      cycle: () => this.choices('mode').filter(o => o.id === 'default'),
+      cycle: () => this.choices('mode').filter(o => o.id === 'default' || o.id === 'plan'),
       set: id => this.setOption('mode', id),
     }
   }
@@ -436,7 +444,8 @@ export class Session {
   replayUserChunk(u) {
     if (this.replayUser && u.messageId && u.messageId !== this.replayUser.id) this.flushReplayUser()
     this.replayUser ??= { id: u.messageId, blocks: [], images: [] }
-    if (u.content.type === 'text') this.replayUser.blocks.push({ type: 'text', text: u.content.text })
+    const text = contentText(u.content)
+    if (text) this.replayUser.blocks.push({ type: 'text', text })
     if (u.content.type === 'image') {
       const image = transcriptImage(u.content)
       if (image) this.replayUser.images.push(image)
@@ -446,7 +455,6 @@ export class Session {
     if (this.status === 'disposed') return
     const messageChunk = u.sessionUpdate === 'agent_message_chunk' || u.sessionUpdate === 'agent_thought_chunk'
     if (messageChunk || u.sessionUpdate === 'tool_call' || u.sessionUpdate === 'tool_call_update') this.flushReplayUser()
-    if (messageChunk && this.status === 'idle') return
     if (messageChunk && u.messageId && u.messageId !== this.messageId) {
       this.flush()
       this.messageId = u.messageId
@@ -455,7 +463,8 @@ export class Session {
       case 'agent_message_chunk':
       case 'agent_thought_chunk': {
         const image = u.content?.type === 'image' ? transcriptImage(u.content) : undefined
-        if (!image && (u.content?.type !== 'text' || !u.content.text)) return
+        const text = contentText(u.content)
+        if (!image && !text) return
         const kind = u.sessionUpdate === 'agent_message_chunk' ? 'text' : 'reasoning'
         if (!this.blocks.length && !this.replyImages.length) {
           this.attempt = randomUUID()
@@ -463,32 +472,16 @@ export class Session {
         }
         if (image) { this.replyImages.push(image); break }
         if (this.blocks.at(-1)?.type !== kind) this.blocks.push({ type: kind, text: '' })
-        this.blocks.at(-1).text += u.content.text
+        this.blocks.at(-1).text += text
         this.emit({ type: 'assistant.delta', attemptId: this.attempt, index: this.blocks.length - 1, time: Date.now(),
-          turn: this.turn, step: this.step, delta: { kind, text: u.content.text } })
+          turn: this.turn, step: this.step, delta: { kind, text } })
         break
       }
       case 'user_message_chunk':
         if (this.status === 'starting' && u.content) this.replayUserChunk(u)
         break
       case 'tool_call':
-      case 'tool_call_update': {
-        this.flush()
-        const callId = u.toolCallId
-        if (!this.tools.has(callId)) {
-          this.tools.set(callId, false)
-          this.emit({ type: 'tool.call', seq: ++this.seq, turn: this.turn, step: this.step, callId,
-            name: u.title || u.kind || 'Tool', presentation: toolView(u), argsJson: JSON.stringify(u.rawInput ?? u.locations ?? {}), time: Date.now() })
-        }
-        const output = toolText(u)
-        if (u.status === 'completed' || u.status === 'failed') {
-          if (this.tools.get(callId)) break
-          this.tools.set(callId, true)
-          this.emit({ type: 'tool.result', seq: ++this.seq, turn: this.turn, step: this.step, callId, time: Date.now(),
-            isError: u.status === 'failed', presentation: toolView(u), text: output, content: [{ type: 'text', text: output }] })
-        } else if (output) this.emit({ type: 'tool.output', callId, text: output, time: Date.now() })
-        break
-      }
+      case 'tool_call_update': this.updateTool(u); break
       case 'available_commands_update':
         this.nativeCommands = u.availableCommands
         if (this.nativeCommands.some(c => c.name === 'compact')) {
@@ -506,10 +499,53 @@ export class Session {
       case 'session_info_update': if (u.title) this.emit({ type: 'session.title', title: u.title, source: 'auto' }); break
       case 'plan': this.emit({ type: 'todo.write', items: u.entries.map(({ content, status }) => ({ content, status })) }); break
       case 'usage_update':
+        // agy publishes timer and background-agent replies after the initiating
+        // prompt resolves. Their usage update closes a message, without a
+        // second session/prompt response or a new user turn.
+        if (this.status === 'idle') this.flush()
         this.usage = { used: u.used, max: u.size, categories: [] }
         this.capabilities.context = { usage: async () => this.usage }
         this.emit({ type: 'context.usage', used: u.used, max: u.size })
         break
+    }
+  }
+
+  updateTool(update) {
+    this.flush()
+    const callId = update.toolCallId
+    const previous = this.tools.get(callId)
+    if (previous?.status === 'completed' || previous?.status === 'failed') return
+    // A final ACP update may contain only status. Retain the preceding
+    // presentation and content until we can commit the complete result.
+    const call = previous ?? { status: 'pending' }
+    for (const key of ['name', 'kind', 'title', 'content', 'rawInput', 'rawOutput', 'status']) {
+      if (update[key] != null) call[key] = update[key]
+    }
+    this.tools.set(callId, call)
+    if (!previous) {
+      this.emit({ type: 'tool.call', seq: ++this.seq, turn: this.turn, step: this.step, callId,
+        name: call.title || call.name || call.kind || 'Tool', presentation: toolView(call), argsJson: JSON.stringify(call.rawInput ?? update.locations ?? {}), time: Date.now() })
+    }
+    if (!call.task) {
+      const label = { schedule: '计时器', invoke_subagent: '后台智能体', run_workflow: '动态工作流' }[call.name ?? call.title?.replace(/^Run /, '')]
+      if (typeof label === 'string') {
+        const input = call.rawInput ?? {}
+        const description = [input.Prompt, input.Description, input.TaskName, input.Instruction].find(v => typeof v === 'string') ?? ''
+        call.task = { label, description }
+        this.emit({ type: 'task.start', taskId: callId, callId, kind: call.name ?? call.title, description: description || label, background: true, time: Date.now() })
+      }
+    }
+    if (call.status === 'completed' || call.status === 'failed') {
+      const text = toolText(call)
+      const images = (call.content ?? []).filter(c => c.type === 'content' && c.content?.type === 'image')
+        .map(c => transcriptImage(c.content)).filter(Boolean)
+      this.emit({ type: 'tool.result', seq: ++this.seq, turn: this.turn, step: this.step, callId, time: Date.now(),
+        isError: call.status === 'failed', presentation: toolView(call), text, content: [{ type: 'text', text }], images: images.length ? images : undefined })
+      if (call.task) this.emit({ type: 'task.end', taskId: callId, status: call.status, time: Date.now() })
+      this.tools.set(callId, { status: call.status, task: call.task })
+    } else {
+      const text = toolText(update)
+      if (text) this.emit({ type: 'tool.output', callId, text, time: Date.now() })
     }
   }
 
@@ -539,7 +575,9 @@ export class Session {
     this.permissions.delete(id)
     item.resolve(choice?.id ? { outcome: { outcome: 'selected', optionId: choice.id } } : cancelled())
     this.emit({ type: 'permission.settled', requestId: id, outcome: choice?.kind === 'reject' ? 'rejected' : choice?.kind ?? 'cancelled' })
-    if (!this.permissions.size && this.status === 'requires-action') this.setStatus('running')
+    if (!this.permissions.size && this.status === 'requires-action') {
+      this.setStatus(this.active ? 'running' : 'idle')
+    }
   }
   dismiss() { for (const id of this.permissions.keys()) this.respond(id) }
 
@@ -603,7 +641,7 @@ export class Session {
       void steered.finally(() => this.steers.delete(steered))
       return { accepted: true }
     }
-    if (this.status !== 'idle' && this.status !== 'disposed' && placement === 'followup') {
+    if (this.active && this.status !== 'idle' && this.status !== 'disposed' && placement === 'followup') {
       this.queue.push({ input })
       this.pending({})
       return { accepted: true }
@@ -663,6 +701,7 @@ export class Session {
       this.dismiss()
       this.emit({ type: 'turn.end', turn: this.turn, time: Date.now(), reason, usage })
       this.cancelling = false
+      this.active = undefined
       if (this.status !== 'disposed' && !this.disposing) {
         this.setStatus('idle')
         const next = this.queue.shift()
@@ -677,12 +716,18 @@ export class Session {
     const remaining = () => this.queue.map(({ input }) => input.clientMessageId)
     if (this.status === 'disposed') return { stillQueued: remaining(), outcome: 'unknown' }
     if (this.status === 'idle') return { stillQueued: [], outcome: 'confirmed' }
+    if (!this.active) {
+      this.dismiss()
+      await this.rpc.notify('session/cancel', { sessionId: this.id })
+      return { stillQueued: remaining(), outcome: 'unknown' }
+    }
+    const active = this.active
     this.cancelling = true
     this.dismiss()
     await this.rpc.notify('session/cancel', { sessionId: this.id })
     let timer
     try {
-      const done = await Promise.race([this.active.then(() => true), new Promise(resolve => { timer = setTimeout(() => resolve(false), 5000) })])
+      const done = await Promise.race([active.then(() => true), new Promise(resolve => { timer = setTimeout(() => resolve(false), 5000) })])
       return { stillQueued: remaining(), outcome: done ? 'confirmed' : 'unknown' }
     } finally { clearTimeout(timer) }
   }
@@ -716,9 +761,17 @@ function toolView(u) {
   if (u.kind === 'execute') return { card: 'terminal', title: u.title ?? 'Terminal' }
 }
 
+// Keep native references visible without fetching linked files or URLs.
+function contentText(content) {
+  if (content?.type === 'text') return content.text
+  if (content?.type === 'resource_link') return [content.name, content.uri].filter(Boolean).join(' · ')
+  if (content?.type === 'resource') return [content.resource?.uri, content.resource?.text].filter(Boolean).join('\n')
+}
+
 function toolText(u) {
   const text = (u.content ?? []).map(c => c.type === 'diff'
     ? [c.path, '---', c.oldText, '+++', c.newText].join('\n')
-    : c.content?.text).filter(Boolean).join('\n')
-  return text || (u.rawOutput == null ? '' : JSON.stringify(u.rawOutput))
+    : contentText(c.content)).filter(Boolean).join('\n')
+  if (text || (u.content ?? []).some(c => c.content?.type === 'image')) return text
+  return u.rawOutput == null ? '' : JSON.stringify(u.rawOutput)
 }
