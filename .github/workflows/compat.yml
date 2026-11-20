@@ -3,6 +3,11 @@ on:
   schedule:
     - cron: '23 4 * * *'
   workflow_dispatch:
+    inputs:
+      candidate:
+        description: Check a fresh tarball from this revision instead of the public npm package
+        type: boolean
+        default: false
 permissions:
   contents: read
 jobs:
@@ -15,11 +20,17 @@ jobs:
       url: ${{ steps.latest.outputs.url }}
       digest: ${{ steps.latest.outputs.digest }}
     steps:
+      - uses: actions/checkout@v4
+        if: inputs.candidate
       - id: latest
         shell: bash
         run: |
           host=$(npm view @deepseek-harness-tui/dsh-tui dist-tags.latest)
-          plugin=$(npm view dsh-tui-antigravity dist-tags.latest)
+          if [[ "${{ inputs.candidate }}" == 'true' ]]; then
+            plugin=$(node -p "require('./package.json').version")
+          else
+            plugin=$(npm view dsh-tui-antigravity dist-tags.latest)
+          fi
           [[ "$host" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ && "$plugin" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
           curl --fail --silent --show-error --retry 3 'https://antigravity-cli-auto-updater-974169037036.us-central1.run.app/manifests/linux_amd64.json' -o manifest.json
           jq -e '(.version|test("^[0-9]+\\.[0-9]+\\.[0-9]+$")) and (.sha512|test("^[a-fA-F0-9]{128}$")) and (.url|test("^https://storage\\.googleapis\\.com/antigravity-public/[a-zA-Z0-9_./-]+$"))' manifest.json >/dev/null
@@ -50,6 +61,11 @@ jobs:
         if: steps.previous.outputs.cache-hit != 'true' || github.event_name == 'workflow_dispatch'
         with:
           node-version: 24
+      - name: Pack candidate
+        if: inputs.candidate
+        run: |
+          archive=$(npm pack --silent --pack-destination "$RUNNER_TEMP")
+          echo "PLUGIN_SPEC=$RUNNER_TEMP/$archive" >> "$GITHUB_ENV"
       - name: Exercise the installed host and backend
         if: matrix.component != 'agy' && (steps.previous.outputs.cache-hit != 'true' || github.event_name == 'workflow_dispatch')
         run: |
