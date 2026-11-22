@@ -73,6 +73,13 @@ jobs:
           python3 -m venv "$RUNNER_TEMP/venv"
           source "$RUNNER_TEMP/venv/bin/activate"
           pip install pexpect==4.9.0 pyte==0.8.2
+          if [[ "${{ matrix.component }}" == backend && "${{ inputs.candidate }}" != true ]]; then
+            tag="v${{ needs.discover.outputs.plugin }}"
+            git fetch --depth=1 origin "refs/tags/$tag:refs/tags/$tag"
+            export COMPAT_TEST_ROOT="$RUNNER_TEMP/release-checks"
+            mkdir -p "$COMPAT_TEST_ROOT"
+            git archive "$tag" test | tar -x -C "$COMPAT_TEST_ROOT"
+          fi
           DSH_HOME="$RUNNER_TEMP/dsh" bash scripts/compat-host.sh "${{ matrix.component }}"
       - name: Check official agy without a Google account
         if: matrix.component == 'agy' && (steps.previous.outputs.cache-hit != 'true' || github.event_name == 'workflow_dispatch')

@@ -18,9 +18,10 @@ ln -s "$host/bin/dsh-tui.js" "$sandbox/bin/dsh-tui"
 export PATH="$sandbox/bin:$PATH"
 case "$1" in
   backend)
-    python "$repo/test/tui_smoke.py" --accounts
+    checks="${COMPAT_TEST_ROOT:-$repo}/test"
+    python "$checks/tui_smoke.py" --accounts
     mkdir test
-    cp "$repo/test/"{session.test.js,agent.mjs} test/
+    cp "$checks/"{session.test.js,agent.mjs} test/
     ln -s "$plugin/backend.js" backend.js
     echo '{"type":"module"}' >package.json
     node --test test/session.test.js
