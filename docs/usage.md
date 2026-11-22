@@ -9,14 +9,14 @@
 | 场景 | 入口及行为 |
 | --- | --- |
 | 配额与积分 | `/usage`、`/quota` 展示每个模型组实际返回的剩余额度、周期和重置时间，结果显示在聊天记录中。同一会话在 60 秒内复用已查询的配额，缓存命中会标注查询时间。输入 `/usage refresh` 强制重新查询。`/credits` 显示积分或账号未提供数据。数据来自 agy 的 headless 命令结果，要求模型回合数为零。 |
-| Antigravity 功能菜单 | `/agy`。当同名命令由 dsh-TUI 接管时，使用 `/agy config`、`/agy permissions`、`/agy hooks`、`/agy skills`、`/agy agents` 等明确选择 Antigravity。报告可刷新、翻页。`/agy account` 显示服务端提供的套餐。 |
+| Antigravity 功能菜单 | `/agy`。当同名命令由 dsh-TUI 接管时，使用 `/agy config`、`/agy permissions`、`/agy hooks`、`/agy skills`、`/agy agents` 等明确选择 Antigravity。长报告末尾提供翻页命令。`/agy account` 显示服务端提供的套餐。 |
 | 全局配置与权限 | `/agy config` 展示执行模式、产物评审策略、工具权限、终端沙箱、工作区外访问五项生效值，可逐项编辑或恢复继承。`/agy permissions` 可查看各层规则，向全局 `deny`、`ask`、`allow` 增删一条规则。每次写入前展示字段、改动和目标路径，默认选中取消。目标文件为 `~/.gemini/antigravity-cli/settings.json`，新启动的官方 agy 也会读取。 |
 | 工作目录和智能体 | `/agy folders` 在当前会话添加或移除附加目录，保留会话 ID，恢复后按 agy 的权限规则处理。`/agy agents` 展示原生工作区发现的预设，选中预设后，同一界面和工作区下一次 `/new` 使用它。 |
 | 计划产物 | `/artifacts`、`/agy artifacts` 在 dsh 面板翻页预览当前原生会话产物目录顶层的 Markdown 文件，包括实施计划。产物由 agy 创建，可返回聊天发送反馈。读回采用官方 CLI 默认的数据目录。[原生会话文件位置](https://antigravity.google/docs/hooks) |
 | 搜索代码 | `/codesearch <表达式>` 或 `/agy codesearch`。在当前工作区用 ripgrep (`rg`) 搜索，支持智能大小写、`-F` 字面匹配及 `f:`、`-f:` 路径过滤。结果可翻页并预览上下行，每次最多显示 120 处；无模型调用。 |
 | 远程控制 | `/agy remote` 查看官方守护进程状态。注册本机并启动（仅本次系统登录有效）、停止并注销均调用官方子命令并需二次确认。浏览器中的设备控制仍由 Google 提供。 |
 | 扩展管理 | `/agy plugins` 安装、启停及卸载原生插件。`/agy mcp` 新建基本 stdio/HTTP 服务、启停及移除，执行前显示命令并确认。宿主 `/mcp` 也能查询原生服务。选择带环境变量或请求头的添加入口，可在掩码框输入字符串键值表。确认面板列出键名；值通过本机 agy 的进程参数传入，由 agy 保存。 |
-| 后台任务 | `/agy tasks` 展示当前会话收到的计时器、动态工作流及后台智能体调用状态，可刷新。一次性定时器触发后，回复和审批仍能到达当前会话。后台调用的状态来自 agy 的工具事件。`/agy team` 可选中一个直接子代理，翻页或刷新其可见回复和工具记录。列表先核对父会话的创建记录，打开时再核对来自父会话的原生消息。该面板适用于默认本机资料目录。 |
+| 后台任务 | `/agy tasks` 展示当前会话收到的计时器、动态工作流及后台智能体调用状态，再次输入该命令即可查看最新状态。一次性定时器触发后，回复和审批仍能到达当前会话。后台调用的状态来自 agy 的工具事件。`/agy team` 可选中一个直接子代理，翻页或刷新其可见回复和工具记录。列表先核对父会话的创建记录，打开时再核对来自父会话的原生消息。该面板适用于默认本机资料目录。 |
 | 模型与执行 | 模型、思考强度和权限模式从当前 ACP 会话读取，变更后以服务端返回值为准。`/plan`、`/plan off` 切换原生模式。agy 公布 compact 后可使用宿主的 `/compact`。`/agy commands` 列出当前会话动态公布的命令；可用 `/agy <命令> [参数]` 调用它们，包括本机观察到的 compact、goal、schedule、browser、swarm 等。具体可用性随账号、版本和配置变化。 |
 | 聊天与工具 | 流式文本和思考、图片输入、工具调用和 diff、原生权限审批、ACP 表单问题、取消、排队和回合内引导。`/agy diff` 汇总当前会话已完成的工具结果中有前后文本的编辑。文件操作是否需要审批由 agy 决定。[官方权限规则](https://antigravity.google/docs/permissions) |
 | 历史与会话 | `dsh-tui --backend antigravity --resume <id>`、宿主会话浏览器、官方 `agy --conversation <id>` 使用同一份原生历史。恢复前核对目录和身份，避免误开空会话。退出时显示恢复命令。`/agy native` 显示当前会话专用的往返命令，方便使用原生终端专属功能。同一测试 profile 的第二个 dsh-TUI 会提示会话被占用。官方 agy 在第一个 TUI 挂载期间仍能在同一会话完成新回合，宿主的占用锁只约束 dsh-TUI。跨前端接力时先退出已有写入端。 |

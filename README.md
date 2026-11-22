@@ -17,6 +17,22 @@ npm 渠道从 v0.1.1 开始提供。需要固定版本时，在包名后加 `@0.
 
 已登录 agy 的用户可以直接发送第一句话，随后输入 `/usage` 检查配额。首次登录时输入 `/login`，按提示完成 Google 授权，回到 TUI 输入 `/new`。浏览器未弹出时，登录页提供打开和复制链接入口。后续也可从启动页或 `/kernel` 选择 Antigravity。
 
+## 体验 main 上的改动
+
+npm 的 `0.1.1` 对应已发布版本。要体验以下功能，可以从当前源码安装：
+
+```sh
+git clone https://github.com/wuqiuwangtian/dsh-tui-antigravity.git
+cd dsh-tui-antigravity
+npm ci
+dsh plugin --profile dsh-tui add "$PWD"
+dsh-tui --backend antigravity
+```
+
+- **看配额**：输入 `/usage` 或 `/quota`，结果直接显示在聊天记录里。同一会话在 60 秒内可复用上次的结果；输入 `/usage refresh` 可立即重新查询。首次查询耗时取决于 agy 返回实时配额的速度。
+- **边访谈边做计划**：输入 `/plan /grill-me 为新用户设计欢迎页`。agy 会提问并根据回答生成待审阅的计划。访谈中可以选推荐项，也可以填写自己的答案。
+- **查原生命令**：`/agy commands` 列出当前会话可用的命令。宿主有同名命令时，可用 `/agy hooks` 等形式指定 agy。长报告在末尾显示翻页命令。
+
 ## 启用配套启动页
 
 退出 dsh-tui 后，在 WSL 中运行以下命令。需要 Git。脚本把配色、像素标题和吉祥物应用到当前 profile 的宿主；品牌设置选择「跟随后端」即可看到效果。
@@ -44,7 +60,10 @@ sh "${DSH_HOME:-$HOME/.dsh}/profiles/dsh-tui/node_modules/dsh-tui-antigravity/ui
 如已应用宿主补丁，先退出 dsh-tui，分别撤销已安装的快捷命令补丁和启动页补丁，再卸载插件。
 
 ```sh
-sh "${DSH_HOME:-$HOME/.dsh}/profiles/dsh-tui/node_modules/dsh-tui-antigravity/ui/brand.sh" remove
+plugin_dir="${DSH_HOME:-$HOME/.dsh}/profiles/dsh-tui/node_modules/dsh-tui-antigravity"
+# 按已安装的补丁执行对应的撤销命令
+sh "$plugin_dir/ui/kernel-shortcuts.sh" remove
+sh "$plugin_dir/ui/brand.sh" remove
 dsh plugin --profile dsh-tui remove dsh-tui-antigravity
 ```
 
@@ -62,6 +81,8 @@ dsh plugin --profile dsh-tui remove dsh-tui-antigravity
 | --- | --- | --- |
 | dsh-tui 后端 | 0.20.2 | WSL 真实对话、配额、审批、历史恢复 |
 | 可选启动页 | 0.20.2 | 图片与字符回退、80×24 布局及补丁撤销 |
+| 可选快捷命令补丁 | 0.20.2 | Tab 补全、与 Codex 双向切换、会话删除指引及补丁撤销 |
+| agy | 1.5.14 | 实测配额查询与缓存、配置编辑、原生访谈和计划产物；[逐项验收记录](docs/verification.md) |
 | agy | 1.5.13 | ACP、登录、模型、配额与原生会话；详细边界见使用手册 |
 
 [上游兼容检查](https://github.com/wuqiuwangtian/dsh-tui-antigravity/actions/workflows/compat.yml) 每天检查 npm 上的 dsh-tui 稳定版和 agy 官方 Linux 版本。新版本在 CI 中分别检查后端、启动页和无账号 ACP 握手；真实账号验收及更新上表由维护者完成。[启动页插件接口讨论](https://github.com/ccch1mneyyy/dsh-TUI/discussions/2069)

@@ -1,6 +1,6 @@
 # Third-party notices
 
-The optional branding patches contain portions of dsh-TUI v0.20.2. The upstream notice for those portions follows.
+The optional branding and kernel shortcut patches contain portions of dsh-TUI v0.20.2. The upstream notice for those portions follows.
 
 MIT License
 
