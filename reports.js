@@ -1,9 +1,8 @@
 import { execFile } from 'node:child_process'
-import { promisify } from 'node:util'
+import { createInterface } from 'node:readline'
 import { settings } from './settings.js'
 import { executable } from './connection.js'
 
-const run = promisify(execFile)
 export const reports = {
   usage: '模型组配额和重置时间',
   quota: '查看模型配额',
@@ -16,22 +15,34 @@ export const reports = {
   changelog: '查看 Antigravity 版本记录',
 }
 
+// agy emits its terminal result before it finishes process cleanup. Keep draining
+// stdout and let the child exit normally after the validated response is ready.
+function queryReport(command, cwd, signal) {
+  return new Promise((resolve, reject) => {
+    let report
+    const child = execFile(executable(), ['--settings', '{"disableSlashCommands":false}', '--output-format', 'stream-json', '--print-timeout', '20s', '-p', '/' + command],
+      { cwd, signal, timeout: 25000, maxBuffer: 2 * 1024 * 1024 }, (error, _stdout, stderr) => {
+        if (error && command === 'credits' && stderr.includes('no credits info found')) resolve({})
+        else reject(new Error(error ? '官方 CLI 查询失败，请检查登录和网络后重试。' : '当前 agy 未返回本地命令结果。'))
+      })
+    const lines = createInterface({ input: child.stdout, crlfDelay: Infinity })
+    lines.on('line', line => {
+      if (!line.trim()) return
+      let record
+      try { record = JSON.parse(line) } catch { reject(new Error('无法解析官方 CLI 的命令结果。')); return }
+      if (record?.event === 'command_result' && record.command?.name === command) report = record
+      if (record?.event === 'result' && report && record.result?.status === 'SUCCESS' && record.result.num_turns === 0) {
+        resolve({ report, result: record.result })
+      }
+    })
+  })
+}
+
 export async function readReport(name, cwd, signal) {
   if (!Object.hasOwn(reports, name)) throw new Error('Unknown report')
   const command = name === 'quota' ? 'usage' : name
-  let stdout
-  try {
-    const result = await run(executable(), ['--settings', '{"disableSlashCommands":false}', '--output-format', 'stream-json', '--print-timeout', '20s', '-p', '/' + command],
-      { cwd, signal, timeout: 25000, maxBuffer: 2 * 1024 * 1024 })
-    stdout = result.stdout
-  } catch (error) {
-    if (name === 'credits' && error.stderr?.includes('no credits info found')) return { text: '当前账号未提供积分信息。' }
-    throw new Error('官方 CLI 查询失败，请检查登录和网络后重试。')
-  }
-  const records = stdout.split('\n').filter(Boolean).map(line => JSON.parse(line))
-  const report = records.find(r => r.event === 'command_result' && r.command?.name === command)
-  const result = records.find(r => r.event === 'result')?.result
-  if (!report || result?.status !== 'SUCCESS' || result.num_turns !== 0) throw new Error('当前 agy 未返回本地命令结果。')
+  const { report, result } = await queryReport(command, cwd, signal)
+  if (!report) return { text: '当前账号未提供积分信息。' }
   if (command === 'usage' && Array.isArray(report.command.data?.groups)) {
     const lines = []
     const windows = []

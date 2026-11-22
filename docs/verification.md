@@ -1,5 +1,27 @@
 # 开发基线与验收记录
 
+## 原生命令排查（WSL，agy 1.5.14，dsh-tui 0.20.2）
+
+按当前账号的 ACP 命令目录、插件命令表及官方 CLI 参考核对入口。表中的“路由验证”指核对传给 ACP 的命令和正文；启动多个子代理、调用浏览器等运行效果沿用下方已有验收。工作区技能、账号权限及 agy 版本都会改变目录。[官方 CLI 命令索引](https://antigravity.google/docs/cli/reference/)
+
+| 范围 | 检查方式与结果 |
+|---|---|
+| 当前 ACP 公布的完整目录 | 本次共 11 个：`agy-customizations`、`antigravity-guide`、`browser`、`compact`、`goal`、`grill-me`、`learn`、`plan`、`run-workflow`、`schedule`、`swarm`。用协议替身逐个验证 `/agy <命令> task` 完整到达 `session/prompt`，另测动态工作区技能和未公布命令。|
+| 官方只读查询 | `usage`（含 `quota`）、`credits`、`agents`、`hooks`、`skills`、`config`、`permissions`、`changelog` 全部走过真实 CLI。积分在本次账号返回无数据。一次更新日志有 250,872 个字符，已将长报告做成可回看的分页。|
+| 性能 | 原实现对应的完整 `agy -p /usage` 三次用时 8.28、6.24、6.03 秒，均为零模型回合。分段测量一次，终态结果在 5.588 秒到达，进程在 6.663 秒退出。修改后以真实 CLI 测得首次查询 4.166 秒，同会话 `/quota` 命中缓存低于 1 毫秒，`/usage refresh` 4.487 秒。这些是本机样本，网络与服务端时间可变。|
+| 组合与表单 | 原先带任务的 `/plan` 会被插件剥掉前缀并改成持久模式。现在连同后面的命令、参数和图片一起交给原生执行。实测 ACP 的访谈把选项和自由输入编码成 `q1` 与可选 `q1_other`，现合并为一个问题。回归覆盖枚举值、自填答复和多文本块。真实 dsh-tui 提交组合命令、选择访谈回答后，在临时会话 brain 目录中生成了计划 Markdown；临时工作区保持为空。|
+| 入口冲突 | `agents`、`compact`、`config`、`hooks`、`skills` 与宿主静态命令同名，`goal` 还受宿主能力路由影响。需要明确调用 agy 时用 `/agy <命令>`。`/agy commands` 显示当前会话的目录。|
+| 插件提供的其他界面 | `diff`、`tasks`、`commands`、`native` 为会话报告；`account` 提供账号操作。对 `plugins`、`mcp`、`remote`、`team`、`folders`、`codesearch`、`artifacts` 逐项检查分发；MCP 和插件增删改用真实 agy 和临时 HOME 复验。真实终端另验证了配额缓存与刷新、配置写入、登录界面与两个模拟身份切换。登录、远程设备注册、子代理启动属于不同操作，不能用只读查询通过推断它们都已复验。|
+
+**官方 TUI 与插件入口的对应关系**
+
+- 会话与配置：新建、恢复、模型和强度选择可用宿主的 `/new`、`/resume`、`/model`、`/effort`；附加目录用 `/agy folders`，产物预览用 `/agy artifacts`，搜索用 `/codesearch <内容>`。原生单次覆盖模型、会话改名/分叉/回滚、逐项批注和搜索结果跳外部编辑器请在官方 CLI 办理。
+- 宿主自有交互：帮助、复制、退出、快捷键和终端显示由 dsh-tui 处理。官方的 `/keybindings`、`/statusline`、`/title`、`/open`、`/feedback`、`/voice` 仍用官方终端。账号登录和切换支持 `/login`；清除原生凭据的 `/logout` 仍由 agy 处理。
+- 后台和计划：`/agy tasks` 展示当前 ACP 会话推送的活动，`/agy team` 提供子代理预览。原生任务管理器、`/swarm board`、独立 `/btw` 和完整 `/context` 图表仍需原生 CLI。本次账号未向 ACP 公布 `boost` 或 `teamwork`。管理远程服务使用 `/agy remote`；本轮没有启动或注销真实设备。
+- 对带参数的变体逐项看语义。比如 `/agy skills` 是查看技能，原生 `/skills reload` 是重载。需要终端专属变体时，可用 `/agy native` 获取同会话的往返命令。
+
+
+
 
 - **真实 TUI** 已验证内核选择、真实模型回复、工作区编辑、工作区外编辑的允许和拒绝、拒绝后的继续对话、Esc 中断，以及中断后开启新回合。安装期间和卸载后，Codex 都能完成真实模型回合。
 - **配额和登录** 已用 PTY 验证 `/usage` 能显示真实模型组和剩余量，无凭据时 `/login` 能显示官方 Google 链接及掩码问题。用户已用一个真实 Google 账号完成登录。WSL 的默认浏览器实际访问了临时本机校验页；80×24 真实终端在无滚动状态下显示授权链接及复制、重新打开操作，两种操作均使用同一条完整 Google URL。两个模拟身份已在真实 dsh-TUI 中完成“首次登录 → 对话 → 切换 → 新会话对话”。双真实 Google 账号切换未实测，按此口径完成本轮验收。已用真实 agy 在临时 HOME 验证无效授权码会返回可重试的错误。首次成功、切换后恢复、旧会话不可用、浏览器回调失败和取消均有协议回归测试。

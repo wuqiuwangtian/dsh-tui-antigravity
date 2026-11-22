@@ -8,7 +8,7 @@
 
 | 场景 | 入口及行为 |
 | --- | --- |
-| 配额与积分 | `/usage`、`/quota` 展示每个模型组实际返回的剩余额度、周期和重置时间，支持刷新和关闭。`/credits` 显示积分或账号未提供数据。数据来自 agy 的 headless 命令结果，要求模型回合数为零。 |
+| 配额与积分 | `/usage`、`/quota` 展示每个模型组实际返回的剩余额度、周期和重置时间，结果显示在聊天记录中。同一会话在 60 秒内复用已查询的配额，缓存命中会标注查询时间。输入 `/usage refresh` 强制重新查询。`/credits` 显示积分或账号未提供数据。数据来自 agy 的 headless 命令结果，要求模型回合数为零。 |
 | Antigravity 功能菜单 | `/agy`。当同名命令由 dsh-TUI 接管时，使用 `/agy config`、`/agy permissions`、`/agy hooks`、`/agy skills`、`/agy agents` 等明确选择 Antigravity。报告可刷新、翻页。`/agy account` 显示服务端提供的套餐。 |
 | 全局配置与权限 | `/agy config` 展示执行模式、产物评审策略、工具权限、终端沙箱、工作区外访问五项生效值，可逐项编辑或恢复继承。`/agy permissions` 可查看各层规则，向全局 `deny`、`ask`、`allow` 增删一条规则。每次写入前展示字段、改动和目标路径，默认选中取消。目标文件为 `~/.gemini/antigravity-cli/settings.json`，新启动的官方 agy 也会读取。 |
 | 工作目录和智能体 | `/agy folders` 在当前会话添加或移除附加目录，保留会话 ID，恢复后按 agy 的权限规则处理。`/agy agents` 展示原生工作区发现的预设，选中预设后，同一界面和工作区下一次 `/new` 使用它。 |
@@ -20,6 +20,12 @@
 | 模型与执行 | 模型、思考强度和权限模式从当前 ACP 会话读取，变更后以服务端返回值为准。`/plan`、`/plan off` 切换原生模式。agy 公布 compact 后可使用宿主的 `/compact`。`/agy commands` 列出当前会话动态公布的命令；可用 `/agy <命令> [参数]` 调用它们，包括本机观察到的 compact、goal、schedule、browser、swarm 等。具体可用性随账号、版本和配置变化。 |
 | 聊天与工具 | 流式文本和思考、图片输入、工具调用和 diff、原生权限审批、ACP 表单问题、取消、排队和回合内引导。`/agy diff` 汇总当前会话已完成的工具结果中有前后文本的编辑。文件操作是否需要审批由 agy 决定。[官方权限规则](https://antigravity.google/docs/permissions) |
 | 历史与会话 | `dsh-tui --backend antigravity --resume <id>`、宿主会话浏览器、官方 `agy --conversation <id>` 使用同一份原生历史。恢复前核对目录和身份，避免误开空会话。退出时显示恢复命令。`/agy native` 显示当前会话专用的往返命令，方便使用原生终端专属功能。同一测试 profile 的第二个 dsh-TUI 会提示会话被占用。官方 agy 在第一个 TUI 挂载期间仍能在同一会话完成新回合，宿主的占用锁只约束 dsh-TUI。跨前端接力时先退出已有写入端。 |
+
+## 组合命令与报告
+
+输入 `/plan /grill-me 为新用户设计欢迎页`，整条提示会发送给 agy，由它主持访谈、生成计划并等待审阅。若输入框中另一个同名命令由宿主接管，使用 `/agy plan /grill-me 为新用户设计欢迎页` 显式指定 Antigravity。访谈每个选择题支持选推荐项或填写自定义答案。单独的 `/plan`、`/plan on`、`/plan off` 继续用作会话模式开关。[官方访谈与组合命令](https://antigravity.google/docs/commands/grill-me/)
+
+`/agy commands` 列出当前会话实际公布的原生命令以及插件的管理入口。只读报告写入聊天记录；长输出按页展示，照行末提示输入 `/agy changelog page 2` 等命令读下一页。翻页复用上一次结果。要修改配置、选智能体或切换账号，请分别打开 `/agy config`、`/agy agents`、`/agy account` 的操作菜单。
 
 ## 与官方 CLI 的差距
 

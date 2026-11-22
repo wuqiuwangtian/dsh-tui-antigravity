@@ -1,5 +1,8 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { backend } from '../backend.js'
 
@@ -85,17 +88,71 @@ test('scope listings locally and reject an unknown resume before session/load', 
   await assert.rejects(backend.open({ kind: 'resume', sessionId: 'absent', cwd }, {}), /native Antigravity catalog/)
 })
 
-test('quota uses a native command result and refreshes without opening a model turn', async t => {
+test('quota reports use transcript rows, share the cache across aliases, and support forced refresh', async t => {
   const s = await start(t)
-  const isResult = e => e.request.questions[0].options.some(o => o.label === '刷新')
-  const first = observe(s, 'question.request', isResult)
-  await s.submit({ text: '/usage', clientMessageId: 'usage' })
-  const { request } = await first
-  assert.match(request.questions[0].detail, /75%/)
-  const refreshed = observe(s, 'question.request', isResult)
-  s.capabilities.questions.respond(request.requestId, { answers: [{ selected: ['刷新'] }] })
-  s.capabilities.questions.cancel((await refreshed).request.requestId)
+  const home = await mkdtemp(join(tmpdir(), 'quota-test-'))
+  const previous = process.env.HOME
+  process.env.HOME = home
+  t.after(async () => { process.env.HOME = previous; await rm(home, { recursive: true, force: true }) })
+  const dir = join(home, '.gemini', 'antigravity-cli')
+  await mkdir(dir, { recursive: true })
+  await writeFile(join(dir, 'antigravity-oauth-token'), 'fixture marker')
+  const report = s.report.bind(s)
+  let calls = 0
+  s.report = (...args) => { calls++; return report(...args) }
+  async function query(text) {
+    const next = observe(s, 'user.message', e => e.source === 'command-output')
+    await s.submit({ text, clientMessageId: text })
+    const row = await next
+    assert.ok(row.displayLive)
+    assert.match(row.text, /75%/)
+    return row
+  }
+  assert.equal((await query('/usage')).label, '/usage')
+  assert.match((await query('/agy quota')).text, /缓存/)
+  assert.equal(calls, 1)
+  await query('/usage refresh')
+  assert.equal(calls, 2)
+  await writeFile(join(dir, 'antigravity-oauth-token'), 'changed identity')
+  await query('/quota')
+  assert.equal(calls, 3)
+  assert.equal(s.panels.pending.size, 0)
   assert.ok(!(await s.history()).some(e => e.type === 'turn.start'))
+})
+
+test('task-bearing plan commands preserve the native prompt and block boundaries', async t => {
+  const s = await start(t)
+  const prompts = []
+  const request = s.rpc.request.bind(s.rpc)
+  s.rpc.request = (method, params) => {
+    if (method === 'session/prompt') prompts.push(params.prompt)
+    return request(method, params)
+  }
+  s.update({ sessionUpdate: 'available_commands_update', availableCommands: [{ name: 'plan', description: 'plan' }] })
+  s.capabilities.modes = {}
+  for (const prefix of ['/plan /grill-me ', '/agy plan /grill-me ', '/grill-me /plan ']) {
+    await s.submit({ clientMessageId: prefix, text: prefix + 'test', blocks: [{ type: 'text', text: prefix }, { type: 'text', text: 'test' }] })
+    await s.active
+    assert.deepEqual(prompts.at(-1).map(b => b.text), [prefix.replace('/agy ', '/'), 'test'])
+  }
+})
+
+test('every advertised native command is reachable via the agy namespace', async t => {
+  const s = await start(t)
+  const native = ['agy-customizations','antigravity-guide','browser','compact','goal','grill-me','learn','plan','run-workflow','schedule','swarm','workspace-skill']
+  s.update({ sessionUpdate: 'available_commands_update', availableCommands: native.map(name => ({ name, description: name })) })
+  const prompts = []
+  const request = s.rpc.request.bind(s.rpc)
+  s.rpc.request = (method, params) => {
+    if (method === 'session/prompt') prompts.push(params.prompt[0].text)
+    return request(method, params)
+  }
+  for (const name of native) {
+    assert.ok((await s.submit({ text: '/agy ' + name + ' task', clientMessageId: name })).accepted)
+    await s.active
+  }
+  assert.deepEqual(prompts, native.map(name => '/' + name + ' task'))
+  assert.equal((await s.submit({text: '/agy unadvertised task', clientMessageId: 'unknown'})).accepted, false)
 })
 
 test('first login uses a secret host field and cancellation leaves the existing credential untouched', async t => {
@@ -136,19 +193,56 @@ test('ACP elicitation maps displayed choices back to native values', async t => 
   assert.equal((await result).content.language, 'en')
 })
 
-test('dismissal during a quota refresh closes the query without reopening a result dialog', async t => {
+test('native interview choices and write-ins share one question and preserve ACP field names', async t => {
   const s = await start(t)
-  const requests = []
-  s.subscribe(events => {
-    for (const e of events) if (e.type === 'question.request') {
-      requests.push(e.request)
-      s.capabilities.questions.cancel(e.request.requestId)
-    }
-  })
-  await s.submit({ text: '/quota', clientMessageId: 'wait' })
-  await new Promise(resolve => setTimeout(resolve, 100))
-  assert.equal(requests.length, 1)
-  assert.ok(!s.localAction)
+  for (const [answer, expected] of [
+    [{ selected: ['Recommended'] }, { q1: '1' }],
+    [{ selected: [], custom: 'Guests' }, { q1_other: 'Guests' }],
+  ]) {
+    const question = observe(s, 'question.request')
+    const result = s.elicit({ mode: 'form', sessionId: s.id, message: 'The agent has a question.', requestedSchema: {
+      properties: { q1: { type: 'string', title: 'Audience?', oneOf: [{ const: '1', title: 'Recommended' }] },
+        q1_other: { type: 'string', title: 'Other' } },
+    } }, new AbortController().signal)
+    const { request } = await question
+    assert.equal(request.questions.length, 1)
+    assert.equal(request.questions[0].question, 'Audience?')
+    assert.equal(request.questions[0].hideCustomInput, false)
+    s.capabilities.questions.respond(request.requestId, { answers: [answer] })
+    const response = await result
+    assert.equal(response.action, 'accept')
+    assert.deepEqual({ ...response.content }, expected)
+  }
+})
+
+test('duplicate lookups share one query and disposal suppresses a late report', async t => {
+  const s = await start(t)
+  let release, started
+  const pending = new Promise(resolve => { started = resolve })
+  let calls = 0
+  s.report = () => { calls++; started(); return new Promise(resolve => { release = resolve }) }
+  await s.submit({ text: '/usage', clientMessageId: 'first' })
+  await pending
+  await s.submit({ text: '/quota refresh', clientMessageId: 'second' })
+  assert.equal(calls, 1)
+  assert.equal(s.localAction, undefined)
+  await s.dispose()
+  release({ text: 'late result' })
+  await new Promise(resolve => setImmediate(resolve))
+  assert.ok(!(await s.history()).some(e => e.source === 'command-output'))
+})
+
+test('long reports can be paged without another query or question dialog', async t => {
+  const s = await start(t)
+  let calls = 0
+  s.report = async () => { calls++; return { text: Array.from({length: 32}, (_, i) => 'line-' + i).join('\n') } }
+  const first = observe(s, 'user.message')
+  await s.submit({ text: '/changelog', clientMessageId: 'one' })
+  assert.match((await first).text, /1\/2 页/)
+  const second = observe(s, 'user.message')
+  await s.submit({ text: '/agy changelog page 2', clientMessageId: 'two' })
+  assert.match((await second).text, /line-31/)
+  assert.equal(calls, 1)
 })
 
 test('replay combines text and images from one user message and restores attachment bytes', async t => {

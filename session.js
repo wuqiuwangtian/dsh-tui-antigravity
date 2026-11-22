@@ -1,5 +1,6 @@
 import { realpath, stat } from 'node:fs/promises'
-import { resolve } from 'node:path'
+import { resolve, join } from 'node:path'
+import { homedir } from 'node:os'
 import { imageSize } from 'image-size'
 import { createHash, randomUUID } from 'node:crypto'
 import { viewTeam } from './team.js'
@@ -22,6 +23,14 @@ const sessionReports = {
   account: '查看当前账号的原生套餐',
   native: '在官方 CLI 打开同一会话',
 }
+const interactiveReports = new Set(['agents', 'account', 'config', 'permissions'])
+const quotaCacheMs = 60_000
+async function credentialStamp() {
+  try {
+    const file = await stat(join(homedir(), '.gemini/antigravity-cli/antigravity-oauth-token'), { bigint: true })
+    return file.ino + ':' + file.ctimeNs
+  } catch { return undefined }
+}
 const reportLabels = { ...reports, ...sessionReports }
 const actionLabels = { ...managers, team: '读取当前会话的子代理回复', folders: '本次会话的附加目录', codesearch: '搜索当前工作区', artifacts: '预览当前会话的 Markdown 产物' }
 const deadline = () => ({ signal: AbortSignal.timeout(30000) })
@@ -41,6 +50,8 @@ export class Session {
     this.queue = []
     this.directories = []
     this.steers = new Set()
+    this.reportQueries = new Map()
+    this.reportPages = new Map()
     this.localCommands = Object.entries(reportLabels).map(([name, description]) => ({ name, description }))
     this.localCommands.push({ name: 'artifacts', description: '预览当前会话的产物' }, { name: 'codesearch', description: '搜索工作区代码' }, { name: 'signin', description: '登录或切换已有 Google 账号' }, { name: 'agy', description: 'Antigravity 功能面板' }, { name: 'plan', description: '切换原生计划模式' })
     this.nativeCommands = []
@@ -115,6 +126,7 @@ export class Session {
   watchConnection(rpc) {
     rpc.closed.then(() => {
       if (this.rpc !== rpc) return
+      this.clearReports()
       this.localAction?.abort()
       this.panels.close()
       this.clearQueue('dropped')
@@ -180,6 +192,7 @@ export class Session {
   async login(action = new AbortController()) {
     if ((this.localAction && this.localAction !== action) || this.status !== 'idle') throw new Error('请先结束当前操作。')
     this.localAction = action
+    this.clearReports()
     try {
       if (!await googleLogin(this.cwd, this.panels, action.signal)) return
       // A first login has no native conversation ID yet. /new lets the
@@ -215,7 +228,8 @@ export class Session {
         options: names.map(name => ({ label: '/' + name, description: labels[name] })), hideCustomInput: true }], action.signal)
       const name = answer?.[0]?.selected?.[0]?.slice(1)
       if (Object.hasOwn(actionLabels, name)) await this.showAction(name, action)
-      else if (Object.hasOwn(reportLabels, name)) await this.showReport(name, action)
+      else if (interactiveReports.has(name)) await this.showReport(name, action)
+      else if (Object.hasOwn(reportLabels, name)) void this.printReport(name)
     } catch {
       if (!action.signal.aborted) this.emit({ type: 'notice', level: 'error', text: '操作未完成。请检查本地 agy 配置。' })
     } finally { this.localAction = undefined }
@@ -275,7 +289,11 @@ export class Session {
         'agy --conversation ' + quote(this.id), '原生会话分叉用 /fork，改名用 /rename；/resume 中按 F4 删除。',
         '返回 dsh-TUI 时，退出 agy 后运行', 'dsh-tui --backend antigravity --resume ' + quote(this.id)].join('\n') }
     }
-    if (name === 'commands') return { text: this.nativeCommands.map(c => '/agy ' + c.name + '  ' + c.description).join('\n') || '当前会话尚未上报原生命令。' }
+    if (name === 'commands') {
+      const native = this.nativeCommands.map(c => '/agy ' + c.name + '  ' + (c.description ?? ''))
+      return { text: ['当前会话 · ACP 原生命令', ...(native.length ? native : ['当前会话尚未上报原生命令。']),
+        '', '报告与管理 · /agy <名称>', ...Object.entries({ ...reportLabels, ...actionLabels }).map(([id, label]) => id + '  ' + label)].join('\n') }
+    }
     if (name === 'tasks') {
       const status = { pending: '等待中', in_progress: '运行中', completed: '已完成', failed: '失败' }
       const rows = [...this.tools.values()].filter(call => call.task)
@@ -293,21 +311,93 @@ export class Session {
     return readReport(name, this.cwd, signal)
   }
 
+  clearReports() {
+    for (const query of this.reportQueries.values()) query.abort()
+    this.reportQueries.clear()
+    this.reportPages.clear()
+    this.lastQuota = undefined
+  }
+
+  printPage(name, page) {
+    const lines = this.reportPages.get(name)
+    if (!lines) {
+      this.emit({ type: 'notice', level: 'info', text: '请先运行 /agy ' + name + '。' })
+      return
+    }
+    const total = Math.ceil(lines.length / 24)
+    if (page < 1 || page > total) {
+      this.emit({ type: 'notice', level: 'error', text: '页码范围为 1–' + total })
+      return
+    }
+    const start = (page - 1) * 24
+    const next = page < total ? page + 1 : page - 1
+    this.outputReport(name, lines.slice(start, start + 24).join('\n') +
+      '\n第 ' + page + '/' + total + ' 页 · /agy ' + name + ' page ' + next)
+  }
+
+  outputReport(name, text) {
+    const seq = ++this.seq
+    const id = 'agy-report-' + seq
+    this.emit({ type: 'user.message', source: 'command-output', displayLive: true, label: '/' + name,
+      seq, id, anchor: id, time: Date.now(), text, blocks: [{ type: 'text', text }] })
+  }
+
+  async printReport(name, refresh = false) {
+    const key = name === 'quota' ? 'usage' : name
+    if (this.reportQueries.has(key)) {
+      this.emit({ type: 'notice', level: 'info', text: '/' + key + ' 查询进行中。' })
+      return
+    }
+    const query = new AbortController()
+    this.reportQueries.set(key, query)
+    const loading = setTimeout(() => {
+      this.emit({ type: 'notice', level: 'info', text: '正在查询 /' + name + '…' })
+    }, 200)
+    try {
+      const stamp = key === 'usage' ? await credentialStamp() : undefined
+      if (query.signal.aborted) return
+      const cached = this.lastQuota
+      const reuse = key === 'usage' && stamp !== undefined && !refresh && cached && cached.stamp === stamp && Date.now() - cached.at < quotaCacheMs
+      const report = reuse ? cached.report : await this.report(key, query.signal)
+      if (query.signal.aborted) return
+      let text = report.text
+      if (key === 'usage') {
+        if (!reuse) this.lastQuota = { report, at: Date.now(), stamp }
+        text += '\n' + (reuse ? '缓存 · ' : '查询于 ') + new Date(this.lastQuota.at).toLocaleTimeString() + ' · /usage refresh 重新查询'
+      }
+      if (report.windows) this.emit({ type: 'rate-limit', info: { windows: report.windows } })
+      // Headless changelogs can exceed 200k characters. Expose the complete
+      // result by page while keeping a single transcript row bounded.
+      const lines = text.split('\n').flatMap(line => line.match(/.{1,240}/gu) ?? [''])
+      if (lines.length > 24) {
+        this.reportPages.set(name, lines)
+        this.printPage(name, 1)
+      } else {
+        this.reportPages.delete(name)
+        this.outputReport(name, text)
+      }
+    } catch (error) {
+      if (!query.signal.aborted) this.emit({ type: 'notice', level: 'error', text: '/' + name + ' · ' + error.message })
+    } finally {
+      clearTimeout(loading)
+      if (this.reportQueries.get(key) === query) this.reportQueries.delete(key)
+    }
+  }
+
   async showReport(name, action) {
     try {
       do {
         const loading = new AbortController()
-        const querySignal = AbortSignal.any([action.signal, loading.signal])
+        const dialogSignal = AbortSignal.any([action.signal, loading.signal])
         const cancelled = this.panels.ask([{ header: 'Antigravity', question: '正在查询 /' + name + '…',
-          options: [{ label: '取消' }], hideCustomInput: true }], querySignal).then(() => {
+          options: [{ label: '取消' }], hideCustomInput: true }], dialogSignal).then(() => {
           if (!loading.signal.aborted) action.abort()
         })
         let detail, agents
         try {
-          const report = await this.report(name, querySignal)
+          const report = await this.report(name, action.signal)
           detail = report.text
           agents = report.agents
-          if (report.windows) this.emit({ type: 'rate-limit', info: { windows: report.windows } })
         } catch (error) { detail = error.message }
         finally { loading.abort(); await cancelled }
         if (action.signal.aborted) break
@@ -597,9 +687,21 @@ export class Session {
   dismiss() { for (const id of this.permissions.keys()) this.respond(id) }
 
   async submit(input, placement = 'turn') {
+    if (this.status === 'disposed') return { accepted: false, dropped: true, reason: 'Antigravity 会话已关闭。' }
     if (this.localAction) return { accepted: false, dropped: true, reason: '请先完成或关闭当前面板。' }
     let text = input.text.trim()
-    const name = text.replace(/^\/agy\s+/, '/').slice(1)
+    const rawName = text.replace(/^\/agy\s+/, '/').slice(1)
+    const page = /^([a-z]+)\s+page\s+(\d+)$/.exec(rawName)
+    if (text.startsWith('/') && page && Object.hasOwn(reportLabels, page[1]) && !interactiveReports.has(page[1])) {
+      this.pending({ claimed: [input.clientMessageId] })
+      this.printPage(page[1], Number(page[2]))
+      return { accepted: true }
+    }
+    const quotaCommand = /^(usage|quota)(?:\s+(refresh))?$/.exec(rawName)
+    const name = quotaCommand?.[1] ?? rawName
+    if (text.startsWith('/') && !quotaCommand && /^(usage|quota)\s/.test(rawName)) {
+      return { accepted: false, dropped: true, reason: '请使用 /usage 或 /usage refresh。' }
+    }
     const search = /^\/(?:agy\s+)?(?:codesearch|cs)(?:\s+([\s\S]*))?$/.exec(text)
     const panel = search ? 'codesearch' : name
     const localPanel = search || text === '/artifacts' || (text.startsWith('/agy ') && Object.hasOwn(actionLabels, panel))
@@ -621,8 +723,10 @@ export class Session {
     }
     if (text.startsWith('/') && Object.hasOwn(reportLabels, name)) {
       this.pending({ claimed: [input.clientMessageId] })
-      this.localAction = new AbortController()
-      void this.showReport(name, this.localAction)
+      if (interactiveReports.has(name)) {
+        this.localAction = new AbortController()
+        void this.showReport(name, this.localAction)
+      } else void this.printReport(name, Boolean(quotaCommand?.[2]))
       return { accepted: true }
     }
     if (localPanel) {
@@ -637,18 +741,21 @@ export class Session {
     if (this.authHint) return { accepted: false, dropped: true, reason: this.authHint }
     if (/^\/agy\s/.test(text)) {
       const command = name.split(/\s+/, 1)[0]
-      if (!(command === 'plan' && this.capabilities.modes) && !this.nativeCommands.some(c => c.name === command)) return { accepted: false, dropped: true, reason: '当前 agy 未提供此命令。输入 /agy 查看可用面板。' }
+      const modeSwitch = /^plan(?:\s+(?:on|off))?$/.test(name) && this.capabilities.modes
+      if (!modeSwitch && !this.nativeCommands.some(c => c.name === command)) return { accepted: false, dropped: true, reason: '当前 agy 未提供此命令。输入 /agy 查看可用面板。' }
       text = '/' + name
-      input = { ...input, text, blocks: [{ type: 'text', text }, ...(input.blocks?.slice(1) ?? [])] }
+      const blocks = input.blocks?.slice()
+      const first = blocks?.findIndex(b => b.type === 'text') ?? -1
+      if (first >= 0) blocks[first] = { ...blocks[first], text: blocks[first].text.replace(/^\s*\/agy\s+/, '/') }
+      input = { ...input, text, blocks }
     }
-    if (/^\/plan(?:\s|$)/.test(text) && this.status === 'idle' && this.capabilities.modes) {
+    // Task-bearing /plan (including stacked commands) is expanded by agy.
+    if (/^\/plan(?:\s+(?:on|off))?$/.test(text) && this.capabilities.modes) {
+      if (this.status !== 'idle') return { accepted: false, dropped: true, reason: '请先结束当前回合再切换模式。' }
       const argument = text.slice(5).trim()
       await this.setOption('mode', argument === 'off' ? 'default' : 'plan')
-      if (!argument || argument === 'on' || argument === 'off') {
-        this.pending({ claimed: [input.clientMessageId] })
-        return { accepted: true }
-      }
-      input = { ...input, text: argument, blocks: [{ type: 'text', text: argument }, ...(input.blocks?.slice(1) ?? [])] }
+      this.pending({ claimed: [input.clientMessageId] })
+      return { accepted: true }
     }
     if (this.status === 'running' && placement === 'steer' && this.acceptSteers && !this.cancelling) {
       const steered = this.steer(input)
@@ -725,6 +832,7 @@ export class Session {
     }
   }
   async cancel(cause) {
+    for (const query of this.reportQueries.values()) query.abort()
     this.localAction?.abort()
     this.panels.close()
     if (cause !== 'user') this.clearQueue('discarded')
@@ -748,6 +856,7 @@ export class Session {
   }
   async dispose() {
     this.disposing = true
+    this.clearReports()
     this.localAction?.abort()
     this.panels.close()
     this.setStatus('disposed')
