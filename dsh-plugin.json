@@ -22,6 +22,7 @@
         "kind": "Backend",
         "id": "io.github.wuqiuwangtian.antigravity",
         "name": "antigravity_backend",
+        "x-kernel-shortcut": "antigravity",
         "spec": {
           "id": "antigravity",
           "label": {

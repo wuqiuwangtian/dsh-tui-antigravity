@@ -29,9 +29,19 @@ dsh-tui --backend antigravity
 
 UI 补丁适配 dsh-tui 0.20.2。其他版本可先使用默认界面。重装同一版宿主后可重新应用；升级宿主前建议先撤销补丁。
 
+## 内核快捷切换与会话删除指引
+
+当前开发版包含一份适用于 dsh-tui 0.20.2 的可选补丁。安装当前源码版插件后，可单独启用这两项交互（独立于启动页配色）。在 WSL 中运行以下命令，然后重新打开 dsh-tui。
+
+```sh
+sh "${DSH_HOME:-$HOME/.dsh}/profiles/dsh-tui/node_modules/dsh-tui-antigravity/ui/kernel-shortcuts.sh"
+```
+
+在启动页或聊天框输入 `/ant`，选中 `/antigravity` 后按 Tab 补全、回车切换。也可直接输入 `/Antigravity`。在 Antigravity 中，`/agy` 打开功能面板。在 `/resume` 的会话列表中选中一条对话并按 Ctrl+D，可查看官方 agy 的删除步骤。撤销宿主补丁时，给上面的脚本加 `remove` 参数。
+
 ## 卸载
 
-如已安装配套启动页，先退出 dsh-tui 并运行第一条命令，再卸载插件。
+如已应用宿主补丁，先退出 dsh-tui，分别撤销已安装的快捷命令补丁和启动页补丁，再卸载插件。
 
 ```sh
 sh "${DSH_HOME:-$HOME/.dsh}/profiles/dsh-tui/node_modules/dsh-tui-antigravity/ui/brand.sh" remove

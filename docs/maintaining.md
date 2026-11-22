@@ -18,4 +18,6 @@ gh workflow run publish.yml --ref vX.Y.Z
 
 `compat.yml` 每天读取 npm stable 与 agy 官方 Linux amd64 清单，按版本及已测试代码提交缓存成功结果。手动运行会跳过缓存直接复验；勾选 candidate 可在首次发布或回归定位时验证当前提交打出的包。后端、UI、agy 三个结果分别展示。新宿主的 UI 检查在一次性 profile 中试打补丁并撤销。通过检查后，再核对实际终端效果和更新生产脚本的版本限制；测试本身不会放宽用户安装的版本限制。真实账号的模型、配额及历史恢复见[验收记录](verification.md)。
 
+快捷命令补丁的本地交互回归用 `DSH_HOME=/path/to/test-profile python test/kernel_pty.py`。测试 profile 需要安装当前插件并应用快捷命令补丁，PATH 需要有 dsh-tui、Codex，Python 需要 pyte 和 pexpect。用临时 HOME 和模拟 agy 验证 Tab 补全、往返切换和 Ctrl+D 指引。
+
 日常排查先打开失败组件的 Actions 日志。对照 npm 上实际发布的插件版本重现，修复后在稳定宿主和候选宿主上复验。仅在需要改动分发内容时发布插件新版本。

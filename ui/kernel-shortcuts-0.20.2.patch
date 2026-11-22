@@ -1,0 +1,504 @@
+diff --git a/lib/types/adapter/ports/channel-view.d.ts b/lib/types/adapter/ports/channel-view.d.ts
+index 8100d8c..129445f 100644
+--- a/lib/types/adapter/ports/channel-view.d.ts
++++ b/lib/types/adapter/ports/channel-view.d.ts
+@@ -1244,6 +1244,10 @@ export interface ChannelCapabilities {
+     readonly resume: boolean;
+     /** Catalog removal keeps the transcript when explicitly marked as archive. */
+     readonly deleteAction?: 'archive';
++    readonly deleteHint?: Readonly<{
++        zh: string;
++        en: string;
++    }>;
+     readonly subagents: boolean;
+     readonly tasks: boolean;
+     readonly mcp: boolean;
+diff --git a/lib/types/agent/backend-manifest.d.ts b/lib/types/agent/backend-manifest.d.ts
+index 735ff03..f4196ad 100644
+--- a/lib/types/agent/backend-manifest.d.ts
++++ b/lib/types/agent/backend-manifest.d.ts
+@@ -40,6 +40,7 @@ export interface BackendManifest {
+     /** Short brand name (the launchpad corner plate, the handoff notices): never
+      *  localized, and short enough for a narrow terminal (the full name is 40
+      *  columns wide and would push the cwd plate off the bottom edge). */
++    readonly kernelShortcut?: string;
+     readonly shortLabel: string;
+     /** Product a version belongs to (`claude-code v2.1.0`); absent = bare version. */
+     readonly product?: string;
+diff --git a/lib/types/agent/backend.d.ts b/lib/types/agent/backend.d.ts
+index 85ccc76..8a689a4 100644
+--- a/lib/types/agent/backend.d.ts
++++ b/lib/types/agent/backend.d.ts
+@@ -204,6 +204,10 @@ export interface SessionCatalog {
+     delete?(sessionId: string, cwd?: string): Promise<void>;
+     /** Omitted means deletion; archive keeps the backend's durable transcript. */
+     readonly deleteAction?: 'archive';
++    readonly deleteHint?: Readonly<{
++        zh: string;
++        en: string;
++    }>;
+ }
+ /** Backend-scoped launcher marker and session browser usage notes. */
+ export interface BackendSessionPrefs {
+diff --git a/lib/types/channel/capabilities.d.ts b/lib/types/channel/capabilities.d.ts
+index 25332c0..93b9ff5 100644
+--- a/lib/types/channel/capabilities.d.ts
++++ b/lib/types/channel/capabilities.d.ts
+@@ -20,5 +20,9 @@ export declare function channelCapabilities(input: {
+     readonly resume?: boolean;
+     /** The backend catalog's optional, non-destructive removal semantics. */
+     readonly deleteAction?: 'archive';
++    readonly deleteHint?: Readonly<{
++        zh: string;
++        en: string;
++    }>;
+ }): ChannelCapabilities;
+ //# sourceMappingURL=capabilities.d.ts.map
+\ No newline at end of file
+diff --git a/lib/types/channel/capabilities.js b/lib/types/channel/capabilities.js
+index 5791b19..6cb8dd9 100644
+--- a/lib/types/channel/capabilities.js
++++ b/lib/types/channel/capabilities.js
+@@ -36,6 +36,7 @@ export function channelCapabilities(input) {
+         backendLabel: input.backendLabel,
+         modelRoutes: input.dsh ? 'providers' : 'backend',
+         ...(input.dsh || input.deleteAction === undefined ? {} : { deleteAction: input.deleteAction }),
++        ...(input.dsh || input.deleteHint === undefined ? {} : { deleteHint: input.deleteHint }),
+         commands: Object.freeze([
+             ...supportedLocalCommandNames({ dsh: input.dsh, has: capability => flags[capability] }),
+             // The typed `modes` capability is its own permission roster: a
+diff --git a/lib/types/commands.d.ts b/lib/types/commands.d.ts
+index a739811..0d017eb 100644
+--- a/lib/types/commands.d.ts
++++ b/lib/types/commands.d.ts
+@@ -225,7 +225,7 @@ export declare function workingHoldOf(name: string, skill?: boolean): WorkingHol
+  * @returns The parsed name and raw input, or `undefined` when the line is
+  *   not a command.
+  */
+-export declare function parseCommandName(line: string): {
++export declare function parseCommandName(line: string, kernelShortcuts?: ReadonlyMap<string, string>): {
+     name: string;
+     rawInput: string;
+ } | undefined;
+diff --git a/lib/types/commands.js b/lib/types/commands.js
+index 80ff52f..97dae21 100644
+--- a/lib/types/commands.js
++++ b/lib/types/commands.js
+@@ -377,11 +377,14 @@ export function workingHoldOf(name, skill) {
+  * @returns The parsed name and raw input, or `undefined` when the line is
+  *   not a command.
+  */
+-export function parseCommandName(line) {
+-    const match = /^\/([a-z][a-z0-9_-]*)(?=$|[\t\n\r ])/.exec(line);
++export function parseCommandName(line, kernelShortcuts) {
++    const match = /^\/([a-z][a-z0-9_-]*)(?=$|[\t\n\r ])/i.exec(line);
+     if (match === null)
+         return undefined;
+-    return { name: match[1], rawInput: line.slice(match[0].length) };
++    const name = match[1].toLowerCase();
++    if (name !== match[1] && !kernelShortcuts?.has(name))
++        return undefined;
++    return { name, rawInput: line.slice(match[0].length) };
+ }
+ /**
+  * Whether the input names a local command. Local commands must never be sent
+diff --git a/lib/types/components/PromptInput.d.ts b/lib/types/components/PromptInput.d.ts
+index 4a42e07..c4d905c 100644
+--- a/lib/types/components/PromptInput.d.ts
++++ b/lib/types/components/PromptInput.d.ts
+@@ -3,6 +3,7 @@ import type { ChannelUi as Channel } from '../adapter/channel/ui-policy.js';
+ import type { ComposerImageRef } from '../dsh-adapter/channel.js';
+ import type { TranscriptImage } from '../dsh-adapter/transcript-images.js';
+ import type { TuiMentionHost } from '../dsh-adapter/mention-providers.js';
++import type { kernelCommandMenu } from './kernelShortcuts.js';
+ import { type PromptDraftCache } from './promptDraftCache.js';
+ export { sanitizeEditableText, sanitizePastedText } from '../utils/inputPaste.js';
+ /** Capabilities referenced by `text`, in first occurrence order. A raw token
+@@ -53,6 +54,7 @@ export interface PromptController {
+  * the way back; the shape and the reasoning live in `promptDraftCache.ts`.
+  */
+ export interface PromptInputProps {
++    kernelMenu?: ReturnType<typeof kernelCommandMenu>;
+     channel: Channel;
+     /**
+      * Plugin `@` completion providers (the tuiMentions host facade). Absent or
+@@ -206,5 +208,5 @@ export interface PromptInputProps {
+  * working) interrupts the turn and delivers them right away; Ctrl+Enter
+  * aborts the turn and sends the current input immediately.
+  */
+-export declare function PromptInput({ channel, mentionProviders, toastSuppressed, suspended, cursorParking, draftCache, onInputReady, helpOpen, onToggleHelp, onRunCommand, selectionActive, fillText, onFillConsumed, onRewindRequest, onBackgroundRequest, onOpenSessions, backendLabel, backgroundAgentsNeedingInput, controllerRef, onCaretImage, caretPreviewOpen, onDismissCaretPreview, now, }: PromptInputProps): React.JSX.Element | null;
++export declare function PromptInput({ kernelMenu, channel, mentionProviders, toastSuppressed, suspended, cursorParking, draftCache, onInputReady, helpOpen, onToggleHelp, onRunCommand, selectionActive, fillText, onFillConsumed, onRewindRequest, onBackgroundRequest, onOpenSessions, backendLabel, backgroundAgentsNeedingInput, controllerRef, onCaretImage, caretPreviewOpen, onDismissCaretPreview, now, }: PromptInputProps): React.JSX.Element | null;
+ //# sourceMappingURL=PromptInput.d.ts.map
+\ No newline at end of file
+diff --git a/lib/types/components/PromptInput.js b/lib/types/components/PromptInput.js
+index 8d2e612..69bf3f5 100644
+--- a/lib/types/components/PromptInput.js
++++ b/lib/types/components/PromptInput.js
+@@ -337,7 +337,7 @@ const NO_PROVIDED_MATCHES = Object.freeze({ query: '', items: [] });
+  * working) interrupts the turn and delivers them right away; Ctrl+Enter
+  * aborts the turn and sends the current input immediately.
+  */
+-export function PromptInput({ channel, mentionProviders, toastSuppressed, suspended = false, cursorParking = true, draftCache, onInputReady, helpOpen, onToggleHelp, onRunCommand, selectionActive, fillText, onFillConsumed, onRewindRequest, onBackgroundRequest, onOpenSessions, backendLabel, backgroundAgentsNeedingInput, controllerRef, onCaretImage, caretPreviewOpen = false, onDismissCaretPreview, now = Date.now, }) {
++export function PromptInput({ kernelMenu, channel, mentionProviders, toastSuppressed, suspended = false, cursorParking = true, draftCache, onInputReady, helpOpen, onToggleHelp, onRunCommand, selectionActive, fillText, onFillConsumed, onRewindRequest, onBackgroundRequest, onOpenSessions, backendLabel, backgroundAgentsNeedingInput, controllerRef, onCaretImage, caretPreviewOpen = false, onDismissCaretPreview, now = Date.now, }) {
+     const [themeName] = useTheme();
+     const nativeCursor = useNativeCursor();
+     /**
+@@ -958,9 +958,10 @@ export function PromptInput({ channel, mentionProviders, toastSuppressed, suspen
+     // index space: `suggestions` stays the only list selection, Enter dispatch and
+     // clicks read, and the default selection stays the first normal-region row.
+     // The region is marked by colour only — it costs no display row.
++    const menu = kernelMenu ?? channel;
+     const completionInput = value;
+-    const completions = value.startsWith('/') ? channel.commandCompletions(value) : [];
+-    const holdOf = (commandLine) => workingHoldOf(commandLine, channel.commandList.find(command => command.name === commandLine.replace(/^\//, '').split(/[\t ]/u)[0])?.skill === true) !== undefined;
++    const completions = value.startsWith('/') ? menu.commandCompletions(value) : [];
++    const holdOf = (commandLine) => kernelMenu?.targets.has(commandLine.slice(1)) === true || workingHoldOf(commandLine, menu.commandList.find(command => command.name === commandLine.replace(/^\//, '').split(/[\t ]/u)[0])?.skill === true) !== undefined;
+     const normalCompletions = channel.working
+         ? completions.filter(completion => !holdOf(completion.commandLine))
+         : completions;
+@@ -1762,16 +1763,16 @@ export function PromptInput({ channel, mentionProviders, toastSuppressed, suspen
+     const tryRunCommand = (text) => {
+         if (!text.startsWith('/'))
+             return false;
+-        const parsed = parseCommandName(text);
++        const parsed = parseCommandName(text, kernelMenu?.targets);
+         if (parsed === undefined)
+             return false;
+         // Not ready (`ChannelUi.ready`): only boot-safe commands run; the rest
+         // are refused before dispatch so the draft stays. The one chokepoint.
+-        if (channel.ready === false && !isBootSafeCommand(parsed.name)) {
++        if (channel.ready === false && !isBootSafeCommand(parsed.name) && !kernelMenu?.targets.has(parsed.name)) {
+             notifyNotReady();
+             return true;
+         }
+-        const command = channel.commandList.find(entry => entry.name === parsed.name);
++        const command = menu.commandList.find(entry => entry.name === parsed.name);
+         // A built-in the bound backend does not serve is hidden from the menu and
+         // Tab, and a typed one must neither run nor reach the model as text. A
+         // partial embedder channel carries no snapshot: everything is served.
+@@ -1995,7 +1996,7 @@ export function PromptInput({ channel, mentionProviders, toastSuppressed, suspen
+         // same stdin batch before React has rendered the command menu (#1310).
+         const current = valueRef.current;
+         if (!expandedRef.current && !selectionActive) {
+-            if (current.startsWith('/') && !current.includes('\n') && channel.commandCompletions(current).length > 0) {
++            if (current.startsWith('/') && !current.includes('\n') && menu.commandCompletions(current).length > 0) {
+                 clearDraftUndoably();
+                 return true;
+             }
+@@ -2546,7 +2547,7 @@ export function PromptInput({ channel, mentionProviders, toastSuppressed, suspen
+             if (channel.ready === false)
+                 setInput(line);
+             if (line.startsWith('/')) {
+-                const matches = channel.commandCompletions(line);
++                const matches = menu.commandCompletions(line);
+                 if (matches.length === 1) {
+                     dispatchCompletion(matches[0].commandLine, 'submit');
+                     return;
+@@ -3964,7 +3965,7 @@ export function PromptInput({ channel, mentionProviders, toastSuppressed, suspen
+     // editor layer, or external injection controller.
+     if (suspended)
+         return null;
+-    return (_jsxs(Box, { flexDirection: "column", marginTop: 1, children: [floatersOpen && (_jsxs(OverlayAbove, { maxHeight: Math.max(terminalRows - 6, 1), children: [helpOpen && (_jsx(Box, { marginBottom: 1, children: _jsx(HelpMenu, { commands: channel.commandList, viewportHeight: helpViewportHeight, viewportWidth: columns, scrollRef: helpScrollRef, onCommandPick: (name) => {
++    return (_jsxs(Box, { flexDirection: "column", marginTop: 1, children: [floatersOpen && (_jsxs(OverlayAbove, { maxHeight: Math.max(terminalRows - 6, 1), children: [helpOpen && (_jsx(Box, { marginBottom: 1, children: _jsx(HelpMenu, { commands: menu.commandList, viewportHeight: helpViewportHeight, viewportWidth: columns, scrollRef: helpScrollRef, onCommandPick: (name) => {
+                                 // 点击命令行 = 填入 /name 并关闭帮助（Tab 补全的鼠标等价）
+                                 updateFoldBlock(null);
+                                 // `/${name} ` — the whole fill is one undo step.
+diff --git a/lib/types/components/kernelCatalog.d.ts b/lib/types/components/kernelCatalog.d.ts
+index f7db3f4..4b05b90 100644
+--- a/lib/types/components/kernelCatalog.d.ts
++++ b/lib/types/components/kernelCatalog.d.ts
+@@ -16,6 +16,7 @@ export interface KernelEntry {
+     /** Full name: an i18n key for in-tree backends, external text for plugins. */
+     readonly label: KernelLabel;
+     /** Short brand name for the launchpad's corner plate and the notices. */
++    readonly kernelShortcut?: string;
+     readonly shortLabel: string;
+     /** Always selectable, no `AgentBackend` behind it (only dsh). */
+     readonly alwaysAvailable: boolean;
+@@ -30,7 +31,7 @@ export interface KernelEntry {
+  */
+ export interface KernelEntrySource {
+     readonly id: KernelBackendId;
+-    readonly manifest: Pick<BackendManifest, 'label' | 'shortLabel' | 'alwaysAvailable' | 'product'>;
++    readonly manifest: Pick<BackendManifest, 'label' | 'shortLabel' | 'alwaysAvailable' | 'product' | 'kernelShortcut'>;
+     /** The host can actually install this entry — its manifest declares an install
+      *  recipe *and* this host implements that recipe's executor. Derived by the
+      *  registry (`RegisteredBackend.installable`), never declared by a manifest:
+diff --git a/lib/types/components/kernelCatalog.js b/lib/types/components/kernelCatalog.js
+index 383c4c8..1ef51d3 100644
+--- a/lib/types/components/kernelCatalog.js
++++ b/lib/types/components/kernelCatalog.js
+@@ -8,6 +8,7 @@ export function kernelEntriesOf(backends) {
+         id: entry.id,
+         label: entry.manifest.label,
+         shortLabel: entry.manifest.shortLabel,
++        ...(entry.manifest.kernelShortcut === undefined ? {} : { kernelShortcut: entry.manifest.kernelShortcut }),
+         alwaysAvailable: entry.manifest.alwaysAvailable === true,
+         ...(entry.manifest.product === undefined ? {} : { product: entry.manifest.product }),
+         installable: entry.installable,
+diff --git a/lib/types/components/kernelShortcuts.d.ts b/lib/types/components/kernelShortcuts.d.ts
+new file mode 100644
+index 0000000..45ac0bc
+--- /dev/null
++++ b/lib/types/components/kernelShortcuts.d.ts
+@@ -0,0 +1,11 @@
++import { type LocalCommand } from '../commands.js';
++import type { KernelEntry } from './kernelCatalog.js';
++import type { ChannelUi } from '../adapter/channel/ui-policy.js';
++/** An installed backend can offer a shortcut for kernel selection. Its native
++ * slash namespace, existing commands/skills and ambiguous names always win. */
++export declare function kernelCommandMenu(entries: readonly KernelEntry[], channel: Pick<ChannelUi, 'commandList' | 'commandCompletions'>): {
++    targets: Map<string, string>;
++    commandList: readonly LocalCommand[];
++    commandCompletions(input: string): readonly import("../commands.js").CommandCompletion[];
++};
++//# sourceMappingURL=kernelShortcuts.d.ts.map
+\ No newline at end of file
+diff --git a/lib/types/components/kernelShortcuts.js b/lib/types/components/kernelShortcuts.js
+new file mode 100644
+index 0000000..6a7dabd
+--- /dev/null
++++ b/lib/types/components/kernelShortcuts.js
+@@ -0,0 +1,28 @@
++import { BACKEND_CHANNEL_COMMAND, BACKEND_GOAL_COMMAND, BACKEND_PERMISSION_COMMAND, completeCommands, isLocalCommandName } from '../commands.js';
++/** An installed backend can offer a shortcut for kernel selection. Its native
++ * slash namespace, existing commands/skills and ambiguous names always win. */
++export function kernelCommandMenu(entries, channel) {
++    const names = new Map();
++    for (const { kernelShortcut } of entries) {
++        if (kernelShortcut)
++            names.set(kernelShortcut, (names.get(kernelShortcut) ?? 0) + 1);
++    }
++    const targets = new Map();
++    const shortcuts = [];
++    const existing = channel.commandList;
++    const reserved = new Set([BACKEND_CHANNEL_COMMAND, BACKEND_GOAL_COMMAND, BACKEND_PERMISSION_COMMAND, ...existing].map(row => row.name.toLowerCase()));
++    for (const { id, kernelShortcut: name, shortLabel } of entries) {
++        if (!name || names.get(name) !== 1 || isLocalCommandName(name) || reserved.has(name))
++            continue;
++        targets.set(name, id);
++        shortcuts.push({ name, description: `Switch to the ${shortLabel} kernel`, descriptions: { zh: `切换到 ${shortLabel} 内核` } });
++    }
++    return {
++        targets,
++        commandList: shortcuts.length ? [...existing, ...shortcuts] : existing,
++        commandCompletions(input) {
++            const rows = channel.commandCompletions(input);
++            return shortcuts.length ? [...rows, ...completeCommands(input, shortcuts)] : rows;
++        },
++    };
++}
+diff --git a/lib/types/dsh-adapter/backend-assembly.js b/lib/types/dsh-adapter/backend-assembly.js
+index 0728d36..1058622 100644
+--- a/lib/types/dsh-adapter/backend-assembly.js
++++ b/lib/types/dsh-adapter/backend-assembly.js
+@@ -157,7 +157,7 @@ function assembleBundle(bundle, loader, baseUrl, registered, owned) {
+             continue;
+         let manifest;
+         try {
+-            manifest = backendManifestOf(declared.spec);
++            manifest = { ...backendManifestOf(declared.spec), kernelShortcut: declared.kernelShortcut };
+         }
+         catch (error) {
+             refusals.push({ bundle, reason: `its Backend declaration could not be projected (${messageOf(error)})` });
+diff --git a/lib/types/dsh-adapter/channel/core/compose.js b/lib/types/dsh-adapter/channel/core/compose.js
+index f2f0ee3..15eff16 100644
+--- a/lib/types/dsh-adapter/channel/core/compose.js
++++ b/lib/types/dsh-adapter/channel/core/compose.js
+@@ -271,6 +271,7 @@ export function createCoreChannel(ctx, initialSession, options, owner) {
+         dsh: false,
+         resume: options.openSession !== undefined && options.sessionCatalog !== undefined,
+         deleteAction: options.sessionCatalog?.deleteAction,
++        deleteHint: options.sessionCatalog?.delete === undefined ? options.sessionCatalog?.deleteHint : undefined,
+     });
+     const initialCapabilities = snapshotOf(initialSession);
+     /**
+diff --git a/lib/types/dsh-adapter/plugin-declaration.d.ts b/lib/types/dsh-adapter/plugin-declaration.d.ts
+index cb0123d..0196b32 100644
+--- a/lib/types/dsh-adapter/plugin-declaration.d.ts
++++ b/lib/types/dsh-adapter/plugin-declaration.d.ts
+@@ -20,6 +20,7 @@ export interface DeclaredBackend {
+      *  the backend id its `spec` carries). */
+     readonly name: string;
+     /** The public declaration, already validated: `validateBackendSpec()`'s result. */
++    readonly kernelShortcut?: string;
+     readonly spec: BackendSpec;
+ }
+ /** What one declaration contributes, and what could not be read out of it. */
+diff --git a/lib/types/dsh-adapter/plugin-declaration.js b/lib/types/dsh-adapter/plugin-declaration.js
+index aa65af2..4fe7a0f 100644
+--- a/lib/types/dsh-adapter/plugin-declaration.js
++++ b/lib/types/dsh-adapter/plugin-declaration.js
+@@ -117,7 +117,12 @@ export function declaredBackendsOf(record) {
+             continue;
+         }
+         try {
+-            backends.push({ name, spec: validateBackendSpec(candidate.spec) });
++            // Optional row metadata. Older hosts ignore it and admit the same Backend spec.
++            const shortcut = candidate['x-kernel-shortcut'];
++            if (shortcut !== undefined && (typeof shortcut !== 'string' || !/^[a-z][a-z0-9_-]{0,31}$/u.test(shortcut))) {
++                throw new TypeError('x-kernel-shortcut must be a slash command name without the slash');
++            }
++            backends.push({ name, spec: validateBackendSpec(candidate.spec), ...(shortcut === undefined ? {} : { kernelShortcut: shortcut }) });
+         }
+         catch (error) {
+             problems.push(`${where} (${name}) has an invalid Backend content: ${error instanceof Error ? error.message : String(error)}`);
+diff --git a/lib/types/i18n.d.ts b/lib/types/i18n.d.ts
+index 0fd93fe..08c5cc9 100644
+--- a/lib/types/i18n.d.ts
++++ b/lib/types/i18n.d.ts
+@@ -1829,6 +1829,10 @@ declare const dict: {
+         readonly zh: "无法进入会话「{{name}}」· {{reason}}";
+         readonly en: "Could not enter {{name}} · {{reason}}";
+     };
++    readonly 'supervisor-hint-native-delete': {
++        readonly zh: "Ctrl+D 查看原生删除步骤 · Enter 进入会话 · Esc 返回";
++        readonly en: "Ctrl+D native deletion instructions · Enter open · Esc back";
++    };
+     readonly 'supervisor-hint-list-backend': {
+         readonly zh: "**←/→** 切换栏位 · **Enter** 进入会话 · Ctrl+R 重命名 · Ctrl+D 删除 · Esc 返回";
+         readonly en: "**←/→** switch pane · **Enter** enter · Ctrl+R rename · Ctrl+D delete · Esc back";
+diff --git a/lib/types/i18n.js b/lib/types/i18n.js
+index 01c95b0..ec116c4 100644
+--- a/lib/types/i18n.js
++++ b/lib/types/i18n.js
+@@ -601,6 +601,7 @@ const dict = {
+     'supervisor-stop-current': { zh: '不能停止当前正在使用的会话', en: 'The session you are attached to cannot be stopped' },
+     'supervisor-open-failed': { zh: '无法进入会话「{{name}}」· {{reason}}', en: 'Could not enter {{name}} · {{reason}}' },
+     // 外部来源标签页（其他 coding agent 的会话，选中即导入）
++    'supervisor-hint-native-delete': { zh: 'Ctrl+D 查看原生删除步骤 · Enter 进入会话 · Esc 返回', en: 'Ctrl+D native deletion instructions · Enter open · Esc back' },
+     'supervisor-hint-list-backend': { zh: '**←/→** 切换栏位 · **Enter** 进入会话 · Ctrl+R 重命名 · Ctrl+D 删除 · Esc 返回', en: '**←/→** switch pane · **Enter** enter · Ctrl+R rename · Ctrl+D delete · Esc back' },
+     'supervisor-hint-list-archive': { zh: '**←/→** 切换栏位 · **Enter** 进入会话 · Ctrl+R 重命名 · Ctrl+D 归档 · Esc 返回', en: '**←/→** switch pane · **Enter** enter · Ctrl+R rename · Ctrl+D archive · Esc back' },
+     'supervisor-archive-confirm': { zh: '归档会话「{{name}}」？原生对话记录保留 · **Enter** 确认 · Esc 取消', en: 'Archive session {{name}}? The native transcript is kept · **Enter** confirm · Esc cancel' },
+diff --git a/lib/types/screens/Chat.js b/lib/types/screens/Chat.js
+index 805ed9a..e380aa3 100644
+--- a/lib/types/screens/Chat.js
++++ b/lib/types/screens/Chat.js
+@@ -120,6 +120,7 @@ import { PluginManagePane } from '../components/PluginManagePane.js';
+ import { teamMemberCounts } from '../components/teamRoster.js';
+ import { usePluginWriteFlow } from './chat/usePluginWriteFlow.js';
+ import { ChannelPicker } from '../components/ChannelPicker.js';
++import { kernelCommandMenu } from '../components/kernelShortcuts.js';
+ import { modeDisplayName } from '../sessionModes.js';
+ import { PERMISSION_PRESET_AUTO, permissionPresetLabel } from '../permissionPresetLabels.js';
+ import { PlanPicker } from '../components/PlanPicker.js';
+@@ -773,7 +774,8 @@ export function Chat({ channel, questionStore, approvalStore, extensionDialogs,
+      * settings / help 的 early-return 排在两个界面**之后**：不收掉当前界面就是
+      * "点了没反应"，状态还滞留着、等界面关掉才突然弹出来。默认收，白名单只留给覆盖层。
+      */
+-    const overlayCommandNames = React.useMemo(() => new Set(['model', 'effort', 'plan', 'preset', 'permission', 'kernel', 'dsh', 'codex', 'claude']), []);
++    const menu = React.useMemo(() => kernelCommandMenu(kernelEntries, channel), [kernelEntries, channel, channel.commandList]);
++    const overlayCommandNames = React.useMemo(() => new Set(['model', 'effort', 'plan', 'preset', 'permission', 'kernel', 'dsh', 'codex', 'claude', ...menu.targets.keys()]), [menu]);
+     /**
+      * 打开**整屏界面**的命令（第七版）：从落地页触发这些命令时**不收掉落地页**
+      * ——整屏盖在落地页之上渲染（它们的 early-return 排在落地页分支之前），
+@@ -2620,7 +2622,7 @@ export function Chat({ channel, questionStore, approvalStore, extensionDialogs,
+     /** Not-ready refusal (`ChannelUi.ready`) for paths that bypass the composer:
+      *  true, after a notice, when `name` (undefined: plain text) must wait. */
+     const refusedAtStartup = (name) => {
+-        if (channel.ready !== false || (name !== undefined && isBootSafeCommand(name)))
++        if (channel.ready !== false || (name !== undefined && (isBootSafeCommand(name) || menu.targets.has(name))))
+             return false;
+         channel.notify(t('startup-not-ready', { backend: kernelCurrentOption?.shortLabel ?? channel.backendCapabilities.backendId }), { color: 'warning', timeoutMs: 2500 });
+         return true;
+@@ -2673,12 +2675,12 @@ export function Chat({ channel, questionStore, approvalStore, extensionDialogs,
+      */
+     const submitLaunchpad = (submit) => {
+         const text = submit.trim();
+-        const parsed = text.startsWith('/') ? parseCommandName(text) : undefined;
++        const parsed = text.startsWith('/') ? parseCommandName(text, menu.targets) : undefined;
+         // Refused BEFORE the page closes, so the draft stays on it.
+         if (text !== '' && refusedAtStartup(parsed?.name))
+             return;
+         const images = composerImageRefsForText(text, launchpadImagesRef.current);
+-        const command = parsed === undefined ? undefined : channel.commandList.find(entry => entry.name === parsed.name);
++        const command = parsed === undefined ? undefined : menu.commandList.find(entry => entry.name === parsed.name);
+         const knownCommand = parsed !== undefined && (isLocalCommandName(parsed.name) || isHiddenCommandName(parsed.name) || command !== undefined);
+         const modelRoutedSkill = command?.skill === true && command.external !== true;
+         // Match the composer's image admission before consuming the draft.
+@@ -2766,6 +2768,11 @@ export function Chat({ channel, questionStore, approvalStore, extensionDialogs,
+     const runCommand = (name, rawInput = '', images = []) => {
+         if (refusedAtStartup(name))
+             return true;
++        const target = menu.targets.get(name);
++        if (target !== undefined) {
++            setHelpOpen(false);
++            return pickKernelById(target).then(() => true);
++        }
+         switch (name) {
+             case 'activity': {
+                 // Ported from the pi working-activity extension: bare `/activity`
+@@ -5951,7 +5958,7 @@ export function Chat({ channel, questionStore, approvalStore, extensionDialogs,
+     const effortPickerStatus = backendCaps?.effort === false
+         ? undefined
+         : { onOpen: () => { void runCommand('effort', ''); } };
+-    const pickerPanels = (_jsxs(_Fragment, { children: [overlay.kind === 'help' && (_jsx(Box, { flexDirection: "column", marginBottom: 1, children: _jsx(HelpMenu, { commands: channel.commandList, viewportHeight: helpCoverViewportHeight, viewportWidth: chatColumns, scrollRef: helpCoverScrollRef, onCommandPick: (name) => {
++    const pickerPanels = (_jsxs(_Fragment, { children: [overlay.kind === 'help' && (_jsx(Box, { flexDirection: "column", marginBottom: 1, children: _jsx(HelpMenu, { commands: menu.commandList, viewportHeight: helpCoverViewportHeight, viewportWidth: chatColumns, scrollRef: helpCoverScrollRef, onCommandPick: (name) => {
+                         // 点击命令行 = 把 /name 填进落地页草稿（聊天页 Tab 补全的
+                         // 鼠标等价），浮层收起、人还在启动页（第八版：不许进对话页）。
+                         dispatchOverlay({ type: 'close' });
+@@ -6488,7 +6495,7 @@ export function Chat({ channel, questionStore, approvalStore, extensionDialogs,
+                 ? undefined
+                 : presetOptions.find(option => option.id === channel.agentPreset)?.name ?? channel.agentPreset, permission: launchpadPermission, commands: launchpadOverlayUp || !launchpadDraft.startsWith('/')
+                 ? undefined
+-                : channel.commandCompletions(launchpadDraft), onCommandPick: submitLaunchpad, cwd: channel.displayCwd, branch: channel.gitBranch, tuiVersion: tuiVersion, 
++                : menu.commandCompletions(launchpadDraft), onCommandPick: submitLaunchpad, cwd: channel.displayCwd, branch: channel.gitBranch, tuiVersion: tuiVersion, 
+             // 右下角的内核行：与选择器同一份目录，标出当前内核，点它打开选择器。
+             kernels: kernelOptions, onKernelPick: () => openKernelPicker(), 
+             // 左下角工作目录铭牌（第七版）：点开/回车开既有 /workspace 菜单——
+@@ -6628,7 +6635,7 @@ export function Chat({ channel, questionStore, approvalStore, extensionDialogs,
+                                                 void setClipboard(answer).then(raw => { if (raw)
+                                                     writeRaw?.(raw); });
+                                                 channel.notify(t('copied-chars', { n: answer.length }), { timeoutMs: 1500 });
+-                                            } }) })) : questionPanelNode !== null ? (questionPanelNode) : null, _jsx(PromptInput, { channel: channel, mentionProviders: extensionMentions, suspended: promptReplacementOpen, 
++                                            } }) })) : questionPanelNode !== null ? (questionPanelNode) : null, _jsx(PromptInput, { kernelMenu: menu, channel: channel, mentionProviders: extensionMentions, suspended: promptReplacementOpen, 
+                                         // 选择器、搜索框或侧栏持有键盘焦点时，让对应输入框接管原生
+                                         // 光标与 IME 锚点，避免主输入框在后续提交中抢回声明。
+                                         cursorParking: overlay.kind === 'none' && sidePanel.focus !== 'panel', 
+diff --git a/lib/types/screens/SessionSupervisor.js b/lib/types/screens/SessionSupervisor.js
+index 3b888fc..8aa5bc6 100644
+--- a/lib/types/screens/SessionSupervisor.js
++++ b/lib/types/screens/SessionSupervisor.js
+@@ -1,7 +1,8 @@
+ import { jsx as _jsx, jsxs as _jsxs } from "react/jsx-runtime";
+ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+ import { Box, Text, useInput, useTerminalSize } from '../ui.js';
+-import { t } from '../i18n.js';
++import { getLang, t } from '../i18n.js';
++import { cleanRenderText } from '../channel/sanitize.js';
+ import { Divider } from '../components/design-system/Divider.js';
+ import { HintLine } from '../components/design-system/HintLine.js';
+ import { SearchBox } from '../components/SearchBox.js';
+@@ -90,6 +91,8 @@ export function SessionSupervisor({ channel, home, onClose, onOpenSession, onNew
+     /** The session-rename draft as the keyboard sees it (see the input handler). */
+     const sessionRenameRef = useRef(sessionRename);
+     sessionRenameRef.current = sessionRename;
++    const nativeHint = channel.backendCapabilities?.deleteHint?.[getLang()];
++    const deleteHint = typeof nativeHint === 'string' ? cleanRenderText(nativeHint, 240) : undefined;
+     const foreign = useForeignSessions({ channel, tab, registry: entries, query, setNotice, onOpenSession });
+     /**
+      * Only sources with data get a tab, after DSH, in a fixed order: ranking
+@@ -344,8 +347,12 @@ export function SessionSupervisor({ channel, home, onClose, onOpenSession, onNew
+             return;
+         }
+         if (!dshBackend && isMod(key) && input === 'd') {
+-            if (activePane === 'list' && focusedSession !== undefined)
+-                setConfirmDelete(focusedSession.id);
++            if (activePane === 'list' && focusedSession !== undefined) {
++                if (deleteHint)
++                    setNotice({ text: deleteHint, tone: 'info' });
++                else
++                    setConfirmDelete(focusedSession.id);
++            }
+             return;
+         }
+         if (isPlainReturn(key)) {
+@@ -455,7 +462,7 @@ export function SessionSupervisor({ channel, home, onClose, onOpenSession, onNew
+     const tabLayout = layoutSourceTabs(tabs, tab, tabBudget);
+     const tabMenuWidth = Math.max(12, ...tabLayout.hidden.map(hidden => stringWidth(hidden.label) + 6));
+     const withTabHint = (text) => (tabs.length < 2 ? text : `${text} · ${t('supervisor-hint-tabs')}`);
+-    const listHint = dshBackend ? t('supervisor-hint-list') : t(archiveSessions ? 'supervisor-hint-list-archive' : 'supervisor-hint-list-backend');
++    const listHint = deleteHint ? t('supervisor-hint-native-delete') : dshBackend ? t('supervisor-hint-list') : t(archiveSessions ? 'supervisor-hint-list-archive' : 'supervisor-hint-list-backend');
+     const railHint = rename !== undefined
+         ? t('home-hint-rename')
+         : confirmRemove !== undefined

@@ -25,7 +25,7 @@
 
 | 功能 | 当前边界及原因 |
 | --- | --- |
-| 原生会话改名、分叉、删除、归档、回滚 | 1.5.13 对 session/set_info、fork、delete、archive、rewind 的 ACP 探测均返回 -32601。在临时真实会话中，官方 print 模式也明确拒绝 /fork 和 /rename。官方交互 CLI 有 /fork、/rename 和 /resume 浏览器的 F2 Rename、F4 Delete。保留原生语义，暂从官方 CLI 办理。Codex 的归档和 agy 的删除有不同的数据保留语义。[原生会话管理](https://antigravity.google/docs/cli/conversations/) |
+| 原生会话改名、分叉、删除、归档、回滚 | 1.5.13 对 session/set_info、fork、delete、archive、rewind 的 ACP 探测均返回 -32601。在临时真实会话中，官方 print 模式也明确拒绝 /fork 和 /rename。官方交互 CLI 有 /fork、/rename 和 /resume 浏览器的 F2 Rename、F4 Delete。保留原生语义，暂从官方 CLI 办理。在 1.5.14 上复核，session/delete 和 session/archive 仍返回 -32601。安装本项目的 0.20.2 快捷命令补丁后，宿主会话列表的 Ctrl+D 会显示原生删除步骤。[原生会话管理](https://antigravity.google/docs/cli/conversations/) |
 | 第三方模型 | 当前客户端只展示 agy 向它公布的模型。官方明确限定哪些 ACP 编辑器可用第三方模型。[官方客户端与模型范围](https://antigravity.google/docs/ide/extensions/acp) |
 | 终端专属交互 | 语音、CLI 状态栏、终端标题、原生任务监视器和完整子代理管理器等依赖原生终端、后台服务或特定 UI。本机可通过 `/agy commands` 查看会话实际上报的命令。可以查看计时器及子代理活动和直接子代理记录。原生任务的逐项停止、子代理消息单独投递、产物逐行批注和快捷键跳转外部编辑器仍用原生 CLI。原生 `/btw` 的独立临时问答和 `/context` 的详细分类均未通过 ACP 提供，宿主只能展示 ACP 实际推送的上下文总量。搜代码面板提供匹配预览。 |
 | 配置编辑与集成 | 界面可编辑上表的五个全局字段及权限规则。原生 `--remote-agent` 和 `--project` 没有对应的本机 ACP 启动选项。其他高级配置和 hook 编写仍用原生入口。插件不维护第二套账户、配额、任务或历史数据库。 |

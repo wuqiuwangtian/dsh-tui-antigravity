@@ -31,10 +31,12 @@ case "$1" in
     sha256sum "${files[@]}" >"$sandbox/before"
     patches=("$plugin/ui/dsh-tui-0.20.2.patch" "$plugin/ui/portrait-pixels.patch")
     # Probe candidate host files only. Production keeps its explicit version gate.
+    shortcut="$plugin/ui/kernel-shortcuts-0.20.2.patch"
+    # Published versions before shortcut support carry only the branding patches.
+    if [[ -f "$shortcut" ]]; then patches+=("$shortcut"); fi
     for patch in "${patches[@]}"; do git apply "$patch"; done
     python "$repo/test/brand_pty.py" "$repo/test/agent.mjs"
-    git apply --reverse "${patches[1]}"
-    git apply --reverse "${patches[0]}"
+    for ((i=${#patches[@]}-1; i>=0; --i)); do git apply --reverse "${patches[i]}"; done
     sha256sum -c "$sandbox/before"
     test ! -e assets/antigravity/cat.png
     test ! -e lib/types/components/AntigravityArt.js

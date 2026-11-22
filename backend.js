@@ -72,7 +72,14 @@ export const backend = {
       return "dsh-tui --backend antigravity --resume '" + quoted + "'"
     },
   },
-  catalog: { list, async info(id, cwd) { return (await list({ cwd, allProjects: !cwd })).find(s => s.id === id) } },
+  catalog: {
+    list,
+    deleteHint: {
+      zh: '在会话所属目录运行 agy，输入 /resume，选中对话后按 F4，核对标题并按 Y 确认。',
+      en: 'Run agy in the conversation directory. Enter /resume, select the conversation, press F4, check the title and confirm with Y.',
+    },
+    async info(id, cwd) { return (await list({ cwd, allProjects: !cwd })).find(s => s.id === id) },
+  },
   async open(target, host) {
     let cwd = target.cwd
     if (target.kind === 'resume') {
