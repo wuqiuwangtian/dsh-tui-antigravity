@@ -37,9 +37,18 @@ const update = update => send({ method: 'session/update', params: { sessionId, u
 let prompting
 for await (const line of createInterface({ input: process.stdin })) {
   const { method, params, id, result } = JSON.parse(line)
+  if (method && process.env.AGY_FIXTURE_RPC_LOG) {
+    appendFileSync(process.env.AGY_FIXTURE_RPC_LOG, JSON.stringify({ pid: process.pid, method, cwd: process.cwd() }) + '\n')
+  }
   switch (method) {
     case 'initialize': send({ id, result: { protocolVersion: 1, agentCapabilities: {}, authMethods: [] } }); break
     case 'session/list':
+      if (process.env.AGY_FIXTURE_WORKSPACE) {
+        send({ id, result: params.cursor ? { sessions: [] } : {
+          sessions: [{ sessionId, cwd: process.env.AGY_FIXTURE_WORKSPACE, title: 'catalog fixture' }], nextCursor: 'second',
+        } })
+        break
+      }
       if (process.env.AGY_FIXTURE_EMPTY_CATALOG || (identities && !account)) { send({ id, result: { sessions: [] } }); break }
       send({ id, result: { sessions: [{ sessionId, cwd: process.cwd(), title: 'fixture' },
         { sessionId: 'foreign', cwd: '/another-project', title: 'other' }] } })

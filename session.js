@@ -79,9 +79,9 @@ export class Session {
     }
   }
 
-  async open(target) {
+  async open(target, rpc) {
     this.id = target.sessionId
-    this.rpc = await this.connectAgent()
+    this.rpc = rpc ?? await this.connectAgent()
     try {
       const loading = target.kind === 'resume'
       const data = await this.rpc.request(loading ? 'session/load' : 'session/new',

@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises'
+import { mkdtemp, mkdir, readFile, writeFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -86,6 +86,30 @@ test('scope listings locally and reject an unknown resume before session/load', 
   const rows = await backend.catalog.list({ cwd })
   assert.deepEqual(rows.map(s => s.id), ['fixture-session'])
   await assert.rejects(backend.open({ kind: 'resume', sessionId: 'absent', cwd }, {}), /native Antigravity catalog/)
+})
+
+test('resume verifies the ID and loads on the same workspace process, stopping at the matching page', async t => {
+  await start(t)
+  const workspace = await mkdtemp(join(tmpdir(), 'resume-workspace-'))
+  const log = join(workspace, 'rpc-log')
+  t.after(async () => {
+    delete process.env.AGY_FIXTURE_RPC_LOG
+    delete process.env.AGY_FIXTURE_WORKSPACE
+    await rm(workspace, { recursive: true, force: true })
+  })
+  process.env.AGY_FIXTURE_RPC_LOG = log
+  process.env.AGY_FIXTURE_WORKSPACE = workspace
+  for (const from of [workspace, process.cwd()]) {
+    await writeFile(log, '')
+    const session = await backend.open({ kind: 'resume', sessionId: 'fixture-session' }, { cwd: from })
+    try {
+      assert.equal(session.cwd, workspace)
+      const calls = (await readFile(log, 'utf8')).trim().split('\n').map(line => JSON.parse(line))
+      assert.deepEqual(calls.filter(c => c.cwd === workspace).map(c => c.method), ['initialize', 'session/list', 'session/load'])
+      assert.equal(new Set(calls.filter(c => c.cwd === workspace).map(c => c.pid)).size, 1)
+      if (from !== workspace) assert.deepEqual(calls.filter(c => c.cwd === from).map(c => c.method), ['initialize', 'session/list'])
+    } finally { await session.dispose() }
+  }
 })
 
 test('quota reports use transcript rows, share the cache across aliases, and support forced refresh', async t => {
