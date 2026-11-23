@@ -1,5 +1,5 @@
 import { realpath, stat } from 'node:fs/promises'
-import { resolve, join } from 'node:path'
+import { isAbsolute, join, relative, resolve } from 'node:path'
 import { homedir } from 'node:os'
 import { imageSize } from 'image-size'
 import { createHash, randomUUID } from 'node:crypto'
@@ -13,7 +13,7 @@ import { elicit } from './forms.js'
 import { Panels } from './panels.js'
 import { readReport, reports } from './reports.js'
 import { googleLogin } from './login.js'
-import { connect } from './connection.js'
+import { connect, normalizeWorkspaceCwd } from './connection.js'
 
 const cancelled = () => ({ outcome: { outcome: 'cancelled' } })
 const sessionReports = {
@@ -36,10 +36,12 @@ const actionLabels = { ...managers, team: '读取当前会话的子代理回复'
 const deadline = () => ({ signal: AbortSignal.timeout(30000) })
 
 export class Session {
-  constructor(cwd, { agent, stageAgent } = {}) {
+  constructor(cwd, { agent, stageAgent, prefs } = {}) {
     this.cwd = cwd
     this.agent = agent
     this.stageAgent = stageAgent
+    this.prefs = prefs
+    this.baseMode = prefs?.read().mode
     this.status = 'starting'
     this.events = []
     this.listeners = new Set()
@@ -49,6 +51,7 @@ export class Session {
     this.replyImages = []
     this.queue = []
     this.directories = []
+    this.steered = new Map()
     this.steers = new Set()
     this.reportQueries = new Map()
     this.reportPages = new Map()
@@ -94,6 +97,7 @@ export class Session {
       this.flush()
       this.configureAccount(data)
       this.configure(data.configOptions ?? [])
+      await this.applySavedPrefs()
       if (this.rpc.hello.agentCapabilities?.promptCapabilities?.image) {
         this.capabilities.images = { limits: { mediaTypes: ['image/png','image/jpeg','image/webp'],
           maxImageBytes: 5_000_000, maxMessageImageBytes: 12_000_000, maxImagesPerMessage: 8,
@@ -129,7 +133,7 @@ export class Session {
       this.clearReports()
       this.localAction?.abort()
       this.panels.close()
-      this.clearQueue('dropped')
+      this.clearPending('dropped')
       this.dismiss()
       this.setStatus('disposed')
     })
@@ -153,28 +157,39 @@ export class Session {
     if (!this.id || this.needsLogin) return
     if (!checkAccount && this.authHint) throw new Error(this.authHint)
     let attached = false, catalog
+    const activePrefs = {
+      model: this.option('model')?.currentValue ?? this.prefs?.read().model,
+      effort: this.option('thought_level')?.currentValue ?? this.prefs?.read().effort,
+      mode: this.option('mode')?.currentValue ?? this.prefs?.read().mode,
+    }
     const next = await this.connectAgent(directories, u => {
       if (attached) this.update(u)
       else if (u.sessionUpdate === 'available_commands_update') catalog = u
     })
     try {
-      let cursor
-      let found = !checkAccount
-      const cursors = new Set()
-      while (!found) {
-        const page = await next.request('session/list', { cwd: this.cwd, cursor }, deadline())
-        found = page.sessions.some(row => row.sessionId === this.id && row.cwd === this.cwd)
-        cursor = page.nextCursor
-        if (cursor && cursors.has(cursor)) throw new Error('Repeated ACP catalog cursor')
-        cursors.add(cursor)
-        if (!cursor) break
+      const targetCwd = resolve(this.cwd)
+      const findInList = async (scopeCwd) => {
+        let cursor
+        const cursors = new Set()
+        while (true) {
+          const page = await next.request('session/list', { cwd: scopeCwd, cursor }, deadline())
+          const rows = Array.isArray(page?.sessions) ? page.sessions : []
+          if (rows.some(row => row.sessionId === this.id && (!row.cwd || resolve(normalizeWorkspaceCwd(row.cwd)) === targetCwd))) return true
+          cursor = page?.nextCursor
+          if (cursor && cursors.has(cursor)) throw new Error('Repeated ACP catalog cursor')
+          cursors.add(cursor)
+          if (!cursor) return false
+        }
       }
+      let found = !checkAccount || await findInList(this.cwd)
+      if (!found && encodeURI(this.cwd) !== this.cwd) found = await findInList(undefined)
       if (!found) throw new Error('此账号的会话目录中没有原会话。请运行 /new 开始新会话。')
       const data = await next.request('session/load', { cwd: this.cwd, sessionId: this.id, mcpServers: [], additionalDirectories: directories }, deadline())
       if (this.disposing || (data.sessionId && data.sessionId !== this.id)) throw new Error('会话已关闭或发生变化。')
       const old = this.rpc
       this.configureAccount(data)
       this.configure(data.configOptions ?? [])
+      await this.applySavedPrefs(activePrefs, next)
       this.rpc = next
       this.authHint = undefined
       attached = true
@@ -186,7 +201,10 @@ export class Session {
       await next.close()
       throw error
     }
-    this.emit({ type: 'session.ready', sessionId: this.id, cwd: this.cwd, model: this.option('model')?.currentValue ?? '' })
+    this.emit({ type: 'session.ready', sessionId: this.id, cwd: this.cwd,
+      model: this.option('model')?.currentValue ?? '',
+      effort: this.option('thought_level')?.currentValue,
+      permissionMode: this.option('mode')?.currentValue })
   }
 
   async login(action = new AbortController()) {
@@ -471,10 +489,31 @@ export class Session {
       current: () => this.option('thought_level').currentValue, levels: () => this.choices('thought_level'),
       set: id => this.setOption('thought_level', id),
     }
-    if (this.option('mode')) this.capabilities.modes = {
-      current: () => this.option('mode').currentValue, list: () => this.choices('mode'),
-      cycle: () => this.choices('mode').filter(o => o.id === 'default' || o.id === 'plan'),
-      set: id => this.setOption('mode', id),
+    if (this.option('mode')) {
+      const currentMode = this.option('mode').currentValue
+      if (currentMode && currentMode !== 'plan') this.baseMode = currentMode
+      this.capabilities.modes = {
+        current: () => this.option('mode').currentValue, list: () => this.choices('mode'),
+        cycle: () => {
+          const base = this.baseMode && this.choices('mode').some(o => o.id === this.baseMode) ? this.baseMode : 'default'
+          return this.choices('mode').filter(o => o.id === base || o.id === 'plan')
+        },
+        set: id => this.setOption('mode', id),
+      }
+    }
+  }
+  async applySavedPrefs(saved = this.prefs?.read(), rpc = this.rpc) {
+    if (!saved || !rpc || !this.id) return
+    // Apply model first because switching models can change available thought_level options.
+    for (const [id, value] of [['model', saved.model], ['thought_level', saved.effort], ['mode', saved.mode]]) {
+      if (!value) continue
+      const current = this.option(id)?.currentValue
+      if (!this.option(id) || current === value) continue
+      if (!this.choices(id).some(o => o.id === value)) continue
+      try {
+        const result = await rpc.request('session/set_config_option', { sessionId: this.id, configId: id, value }, deadline())
+        if (result?.configOptions) this.configure(result.configOptions)
+      } catch {}
     }
   }
   async setOption(id, value) {
@@ -483,9 +522,21 @@ export class Session {
     const result = await this.rpc.request('session/set_config_option', { sessionId: this.id, configId: id, value }, deadline())
     this.configure(result.configOptions)
     const actual = this.option(id)?.currentValue
-    if (id === 'model') this.emit({ type: 'model.changed', model: actual, source: 'user' })
-    if (id === 'thought_level') this.emit({ type: 'effort.changed', effort: actual })
-    if (id === 'mode') this.emit({ type: 'mode.changed', modeId: actual })
+    if (id === 'model') {
+      if (actual) this.prefs?.write({ model: actual })
+      this.emit({ type: 'model.changed', model: actual, source: 'user' })
+    }
+    if (id === 'thought_level') {
+      if (actual) this.prefs?.write({ effort: actual })
+      this.emit({ type: 'effort.changed', effort: actual })
+    }
+    if (id === 'mode') {
+      if (actual && actual !== 'plan') {
+        this.baseMode = actual
+        this.prefs?.write({ mode: actual })
+      }
+      this.emit({ type: 'mode.changed', modeId: actual })
+    }
   }
   emit(event) {
     // Dialogs can contain a one-time auth URL. Never retain them for replay.
@@ -507,9 +558,14 @@ export class Session {
     return () => this.listeners.delete(listener)
   }
   pending(change) {
-    this.emit({ type: 'pending.changed', items: this.queue.map(({ input }) => ({
-      id: input.clientMessageId, text: input.text, placement: 'followup',
-    })), ...change })
+    this.emit({ type: 'pending.changed', items: [
+      ...[...this.steered.values()].map(({ input }) => ({
+        id: input.clientMessageId, text: input.text, placement: 'steer',
+      })),
+      ...this.queue.map(({ input }) => ({
+        id: input.clientMessageId, text: input.text, placement: 'followup',
+      })),
+    ], ...change })
   }
   removePending(id) {
     const index = this.queue.findIndex(({ input }) => input.clientMessageId === id)
@@ -518,8 +574,9 @@ export class Session {
     this.pending({ discarded: [id] })
     return true
   }
-  clearQueue(key) {
-    const ids = this.queue.splice(0).map(({ input }) => input.clientMessageId)
+  clearPending(key) {
+    const ids = [...this.steered.keys(), ...this.queue.splice(0).map(({ input }) => input.clientMessageId)]
+    this.steered.clear()
     if (ids.length) this.pending({ [key]: ids })
   }
 
@@ -587,8 +644,9 @@ export class Session {
         break
       case 'tool_call':
       case 'tool_call_update': this.updateTool(u); break
-      case 'available_commands_update':
-        this.nativeCommands = u.availableCommands
+      case 'available_commands_update': {
+        const available = Array.isArray(u.availableCommands) ? u.availableCommands : []
+        this.nativeCommands = available
         if (this.nativeCommands.some(c => c.name === 'compact')) {
           this.capabilities.compact = { run: async () => {
             const result = await this.submit({ text: '/compact', clientMessageId: randomUUID() })
@@ -597,12 +655,13 @@ export class Session {
           } }
         } else delete this.capabilities.compact
         const names = new Set(this.localCommands.map(c => c.name))
-        this.commands = [...this.localCommands, ...u.availableCommands.filter(c => !names.has(c.name))]
+        this.commands = [...this.localCommands, ...available.filter(c => !names.has(c.name))]
         this.emit({ type: 'commands.changed', commands: this.commands })
         break
-      case 'config_option_update': this.configure(u.configOptions); break
+      }
+      case 'config_option_update': this.configure(u.configOptions ?? []); break
       case 'session_info_update': if (u.title) this.emit({ type: 'session.title', title: u.title, source: 'auto' }); break
-      case 'plan': this.emit({ type: 'todo.write', items: u.entries.map(({ content, status }) => ({ content, status })) }); break
+      case 'plan': this.emit({ type: 'todo.write', items: (u.entries ?? []).map(({ content, status }) => ({ content, status })) }); break
       case 'usage_update':
         // agy publishes timer and background-agent replies after the initiating
         // prompt resolves. Their usage update closes a message, without a
@@ -623,13 +682,14 @@ export class Session {
     // A final ACP update may contain only status. Retain the preceding
     // presentation and content until we can commit the complete result.
     const call = previous ?? { status: 'pending' }
-    for (const key of ['name', 'kind', 'title', 'content', 'rawInput', 'rawOutput', 'status']) {
+    for (const key of ['name', 'kind', 'title', 'content', 'rawInput', 'rawOutput', 'status', 'locations']) {
       if (update[key] != null) call[key] = update[key]
     }
     this.tools.set(callId, call)
     if (!previous) {
+      const info = toolCallPresentation(call, this.cwd)
       this.emit({ type: 'tool.call', seq: ++this.seq, turn: this.turn, step: this.step, callId,
-        name: call.title || call.name || call.kind || 'Tool', presentation: toolView(call), argsJson: JSON.stringify(call.rawInput ?? update.locations ?? {}), time: Date.now() })
+        name: info.name, presentation: info.presentation, argsJson: JSON.stringify(call.rawInput ?? update.locations ?? {}), time: Date.now() })
     }
     if (!call.task) {
       const label = { schedule: '计时器', invoke_subagent: '后台智能体', run_workflow: '动态工作流' }[call.name ?? call.title?.replace(/^Run /, '')]
@@ -642,10 +702,12 @@ export class Session {
     }
     if (call.status === 'completed' || call.status === 'failed') {
       const text = toolText(call)
+      const isError = call.status === 'failed'
       const images = (call.content ?? []).filter(c => c.type === 'content' && c.content?.type === 'image')
         .map(c => transcriptImage(c.content)).filter(Boolean)
       this.emit({ type: 'tool.result', seq: ++this.seq, turn: this.turn, step: this.step, callId, time: Date.now(),
-        isError: call.status === 'failed', presentation: toolView(call), text, content: [{ type: 'text', text }], images: images.length ? images : undefined })
+        isError, ...(isError ? { errorText: text || 'Tool failed' } : {}),
+        presentation: toolResultPresentation(call, text, this.cwd), text, content: [{ type: 'text', text }], images: images.length ? images : undefined })
       if (call.task) this.emit({ type: 'task.end', taskId: callId, status: call.status, time: Date.now() })
       this.tools.set(callId, { status: call.status, task: call.task })
     } else {
@@ -753,20 +815,32 @@ export class Session {
     if (/^\/plan(?:\s+(?:on|off))?$/.test(text) && this.capabilities.modes) {
       if (this.status !== 'idle') return { accepted: false, dropped: true, reason: '请先结束当前回合再切换模式。' }
       const argument = text.slice(5).trim()
-      await this.setOption('mode', argument === 'off' ? 'default' : 'plan')
+      const fallback = this.baseMode && this.choices('mode').some(o => o.id === this.baseMode) ? this.baseMode : 'default'
+      await this.setOption('mode', argument === 'off' ? fallback : 'plan')
       this.pending({ claimed: [input.clientMessageId] })
       return { accepted: true }
     }
     if (this.status === 'running' && placement === 'steer' && this.acceptSteers && !this.cancelling) {
+      const id = input.clientMessageId
+      this.steered.set(id, { input })
+      this.pending({})
       const steered = this.steer(input)
       this.steers.add(steered)
       void steered.finally(() => this.steers.delete(steered))
       return { accepted: true }
     }
-    if (this.active && this.status !== 'idle' && this.status !== 'disposed' && placement === 'followup') {
-      this.queue.push({ input })
-      this.pending({})
-      return { accepted: true }
+    if (this.active && this.status !== 'idle' && this.status !== 'disposed') {
+      if (placement === 'now') {
+        this.queue.unshift({ input })
+        this.pending({})
+        if (!this.cancelling) void this.cancel('user')
+        return { accepted: true }
+      }
+      if (placement === 'followup' || placement === 'steer') {
+        this.queue.push({ input })
+        this.pending({})
+        return { accepted: true }
+      }
     }
     if (this.status !== 'idle') return { accepted: false, dropped: true, reason: 'Antigravity session is busy or disconnected.' }
     this.setStatus('running')
@@ -774,19 +848,46 @@ export class Session {
     return { accepted: true }
   }
   async steer(input) {
+    const id = input.clientMessageId
     const blocks = input.blocks ?? [{ type: 'text', text: input.text }]
     try {
       const prompt = await this.promptBlocks(blocks, input.images)
+      if (!this.steered.has(id)) return
       if (this.cancelling || this.disposing) {
-        this.pending({ dropped: [input.clientMessageId] })
+        this.steered.delete(id)
+        if (!this.disposing) {
+          if (this.cancelCause === 'user') {
+            this.queue.push({ input })
+            this.pending({})
+          } else this.pending({ discarded: [id] })
+        }
         return
       }
-      this.pending({ claimed: [input.clientMessageId] })
-      this.emit({ type: 'user.message', seq: ++this.seq, anchor: input.clientMessageId, id: input.clientMessageId,
+      const result = await this.rpc.request('session/prompt', { sessionId: this.id, prompt })
+      if (!this.steered.delete(id)) return
+      if (result?.stopReason === 'cancelled') {
+        if (this.cancelCause === 'user') {
+          this.queue.push({ input })
+          this.pending({})
+        } else this.pending({ discarded: [id] })
+        return
+      }
+      this.pending({ claimed: [id] })
+      this.emit({ type: 'user.message', seq: ++this.seq, anchor: id, id,
         time: Date.now(), turn: this.turn, source: 'user', text: input.text, blocks, images: input.images })
-      await this.rpc.request('session/prompt', { sessionId: this.id, prompt })
     } catch {
-      if (!this.disposing) this.emit({ type: 'notice', level: 'error', text: 'Antigravity 未确认引导消息的执行结果。' })
+      if (!this.steered.delete(id)) return
+      if (this.disposing) return
+      if (this.cancelling) {
+        if (this.cancelCause === 'user') {
+          this.queue.push({ input })
+          this.pending({})
+        } else this.pending({ discarded: [id] })
+        return
+      }
+      this.queue.push({ input })
+      this.pending({})
+      this.emit({ type: 'notice', level: 'info', text: '当前步骤未能立即插入引导，消息已排入下一回合队列。' })
     }
   }
 
@@ -794,6 +895,31 @@ export class Session {
     const prompt = blocks.filter(b => b.type === 'text').map(b => ({ type: 'text', text: b.text }))
     for (const image of images ?? []) prompt.push({ type: 'image', mimeType: image.mediaType ?? 'image/png', data: Buffer.from(await image.read()).toString('base64') })
     return prompt
+  }
+  async settleSteers() {
+    if (this.steered.size > 0 && this.steers.size > 0) {
+      let timer
+      try {
+        await Promise.race([
+          Promise.allSettled(this.steers),
+          new Promise(resolve => { timer = setTimeout(resolve, this.cancelling ? 250 : 1500) }),
+        ])
+      } finally { clearTimeout(timer) }
+    }
+    if (!this.steered.size) return
+    const leftover = [...this.steered.values()]
+    this.steered.clear()
+    if (this.disposing) return
+    if (this.cancelling) {
+      if (this.cancelCause === 'user') {
+        this.queue.unshift(...leftover.map(({ input }) => ({ input })))
+        this.pending({})
+      } else {
+        this.pending({ discarded: leftover.map(({ input }) => input.clientMessageId) })
+      }
+    } else {
+      this.pending({ dropped: leftover.map(({ input }) => input.clientMessageId) })
+    }
   }
   async run(input) {
     let reason, usage
@@ -812,17 +938,18 @@ export class Session {
     } catch (e) {
       if (e.code === -32000 || /unauthenticated|authentication required/i.test(e.message)) {
         this.authHint = 'agy 需要重新授权。请运行 /login，然后继续会话。'
-        this.clearQueue('dropped')
+        this.clearPending('dropped')
         reason = { kind: 'error', message: this.authHint }
       } else reason = { kind: 'error', message: e.message }
     }
     finally {
       this.acceptSteers = false
-      await Promise.allSettled(this.steers)
+      await this.settleSteers()
       this.flush()
       this.dismiss()
       this.emit({ type: 'turn.end', turn: this.turn, time: Date.now(), reason, usage })
       this.cancelling = false
+      this.cancelCause = undefined
       this.active = undefined
       if (this.status !== 'disposed' && !this.disposing) {
         this.setStatus('idle')
@@ -835,19 +962,20 @@ export class Session {
     for (const query of this.reportQueries.values()) query.abort()
     this.localAction?.abort()
     this.panels.close()
-    if (cause !== 'user') this.clearQueue('discarded')
-    const remaining = () => this.queue.map(({ input }) => input.clientMessageId)
+    if (cause !== 'user') this.clearPending('discarded')
+    const remaining = () => [...this.steered.keys(), ...this.queue.map(({ input }) => input.clientMessageId)]
     if (this.status === 'disposed') return { stillQueued: remaining(), outcome: 'unknown' }
     if (this.status === 'idle') return { stillQueued: [], outcome: 'confirmed' }
     if (!this.active) {
       this.dismiss()
-      await this.rpc.notify('session/cancel', { sessionId: this.id })
+      try { await this.rpc?.notify('session/cancel', { sessionId: this.id }) } catch {}
       return { stillQueued: remaining(), outcome: 'unknown' }
     }
     const active = this.active
     this.cancelling = true
+    this.cancelCause = cause
     this.dismiss()
-    await this.rpc.notify('session/cancel', { sessionId: this.id })
+    try { await this.rpc?.notify('session/cancel', { sessionId: this.id }) } catch {}
     let timer
     try {
       const done = await Promise.race([active.then(() => true), new Promise(resolve => { timer = setTimeout(() => resolve(false), 5000) })])
@@ -860,7 +988,7 @@ export class Session {
     this.localAction?.abort()
     this.panels.close()
     this.setStatus('disposed')
-    this.clearQueue('dropped')
+    this.clearPending('dropped')
     this.dismiss()
     await this.rpc?.close()
     this.listeners.clear()
@@ -878,11 +1006,103 @@ function transcriptImage(content) {
   } catch { return undefined }
 }
 
-function toolView(u) {
-  const diffs = (u.content ?? []).filter(c => c.type === 'diff').map(c =>
+function firstString(...values) {
+  for (const value of values) {
+    if (typeof value === 'string' && value.trim() !== '') return value
+  }
+}
+
+function singleLine(text) {
+  if (typeof text !== 'string') return ''
+  const trimmed = text.trim()
+  if (!trimmed) return ''
+  const lines = trimmed.split(/\r?\n/u)
+  const first = lines[0].trimEnd()
+  return lines.length > 1 ? first + ' …' : first
+}
+
+function displayPath(path, cwd) {
+  if (!path) return ''
+  const normalized = normalizeWorkspaceCwd(path)
+  if (!isAbsolute(normalized) || !cwd) return normalized
+  const rel = relative(cwd, normalized)
+  return rel === '' || rel.startsWith('..') || isAbsolute(rel) ? normalized : rel
+}
+
+function toolDiffs(u) {
+  return (u.content ?? []).filter(c => c.type === 'diff').map(c =>
     ({ path: c.path, oldText: c.oldText ?? null, newText: c.newText }))
-  if (diffs.length) return { card: 'diff', diffs, title: u.title ?? diffs[0].path }
-  if (u.kind === 'execute') return { card: 'terminal', title: u.title ?? 'Terminal' }
+}
+
+function toolPath(u) {
+  const input = u.rawInput ?? {}
+  return firstString(input.Path, input.path, input.file_path, input.TargetFile, u.locations?.[0]?.path)
+}
+
+function shortToolName(u) {
+  const raw = firstString(u.name, u.kind)
+  if (raw) return raw.slice(0, 32)
+  return 'tool'
+}
+
+function toolCallPresentation(u, cwd) {
+  const diffs = toolDiffs(u)
+  if (diffs.length) {
+    const allNew = diffs.every(d => d.oldText == null || d.oldText === '')
+    const name = allNew ? 'write' : 'edit'
+    const paths = diffs.map(d => displayPath(d.path, cwd)).filter(Boolean).join(', ')
+    const title = (allNew ? 'Write ' : 'Edit ') + (paths || singleLine(u.title))
+    return { name, presentation: { card: 'diff', diffs, title: title.trim(), displayKey: allNew ? 'tool-name-write' : 'tool-name-edit', category: 'mutate' } }
+  }
+  const input = u.rawInput ?? {}
+  if (u.kind === 'execute' || /^(?:run_command|bash|shell)$/i.test(u.name ?? '')) {
+    const cmd = firstString(input.CommandLine, input.command, input.cmd, u.title) || 'Terminal'
+    return { name: 'bash', presentation: { card: 'terminal', title: singleLine(cmd), displayKey: 'tool-name-bash', category: 'exec' } }
+  }
+  if (u.kind === 'read' || /^(?:read_file|view_file)$/i.test(u.name ?? '')) {
+    const rawPath = toolPath(u)
+    const stripped = singleLine(u.title).replace(/^(?:file|read|view)\s+/iu, '')
+    const shown = rawPath ? displayPath(rawPath, cwd) : stripped
+    const title = shown ? 'Read ' + shown : singleLine(u.title) || 'Read'
+    return { name: 'read', presentation: { card: 'generic', title, ...(rawPath ? { path: normalizeWorkspaceCwd(rawPath) } : {}), displayKey: 'tool-name-read', category: 'other' } }
+  }
+  if (u.kind === 'search') {
+    const toolName = /web/i.test(u.name ?? '') ? 'web_search' : /glob|find/i.test(u.name ?? '') ? 'glob' : 'grep'
+    const displayKey = 'tool-name-' + toolName
+    const query = firstString(input.query, input.Query, input.pattern, input.Pattern)
+    const title = singleLine(u.title) || (query ? `${toolName} ${query}` : toolName)
+    return { name: toolName, presentation: { card: 'generic', title, displayKey, category: 'other' } }
+  }
+  if (u.kind === 'edit' || u.kind === 'delete' || u.kind === 'move') {
+    const rawPath = toolPath(u)
+    const label = u.kind === 'edit' ? 'Edit' : u.kind === 'delete' ? 'Delete' : 'Move'
+    const title = singleLine(u.title) || (rawPath ? `${label} ${displayPath(rawPath, cwd)}` : label)
+    return { name: u.kind, presentation: { card: 'generic', title, ...(rawPath ? { path: normalizeWorkspaceCwd(rawPath) } : {}), ...(u.kind === 'edit' ? { displayKey: 'tool-name-edit' } : {}), category: 'mutate' } }
+  }
+  const name = shortToolName(u)
+  const title = singleLine(u.title) || name
+  return { name, presentation: { card: 'generic', title, category: 'other' } }
+}
+
+function toolResultPresentation(u, text, cwd) {
+  const diffs = toolDiffs(u)
+  if (diffs.length) {
+    const allNew = diffs.every(d => d.oldText == null || d.oldText === '')
+    const paths = diffs.map(d => displayPath(d.path, cwd)).filter(Boolean).join(', ')
+    const title = (allNew ? 'Write ' : 'Edit ') + (paths || singleLine(u.title))
+    return { card: 'diff', diffs, title: title.trim(), displayKey: allNew ? 'tool-name-write' : 'tool-name-edit', category: 'mutate' }
+  }
+  if (u.kind === 'execute' || /^(?:run_command|bash|shell)$/i.test(u.name ?? '')) {
+    return { card: 'terminal', output: text, displayKey: 'tool-name-bash', category: 'exec' }
+  }
+  if (u.kind === 'read' || /^(?:read_file|view_file)$/i.test(u.name ?? '')) {
+    const rawPath = toolPath(u)
+    const stripped = singleLine(u.title).replace(/^(?:file|read|view)\s+/iu, '')
+    const shown = rawPath ? displayPath(rawPath, cwd) : stripped
+    const title = shown ? 'Read ' + shown : singleLine(u.title) || 'Read'
+    return { card: 'read', title, ...(rawPath ? { path: normalizeWorkspaceCwd(rawPath) } : {}), content: text ? [{ type: 'text', text }] : [], displayKey: 'tool-name-read', category: 'other' }
+  }
+  return toolCallPresentation(u, cwd).presentation
 }
 
 // Keep native references visible without fetching linked files or URLs.

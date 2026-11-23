@@ -1,31 +1,55 @@
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
-import { mkdirSync, writeFileSync, renameSync, readFileSync } from 'node:fs'
-import { randomUUID } from 'node:crypto'
-import { resolve, join } from 'node:path'
-import { connect, executable } from './connection.js'
+import { statSync } from 'node:fs'
+import { resolve } from 'node:path'
+import { connect, executable, normalizeWorkspaceCwd } from './connection.js'
+import { createPrefs } from './prefs.js'
 import { Session } from './session.js'
+
+export { normalizeWorkspaceCwd }
 
 const run = promisify(execFile)
 // One explicit preset choice applies to the next new conversation in this workspace.
 const nextAgents = new Map()
 
-async function* catalogPages(rpc, cwd) {
+function isDirectory(path) {
+  if (!path) return false
+  try { return statSync(path).isDirectory() } catch { return false }
+}
+
+async function* rawCatalogPages(rpc, cwd) {
   const cursors = new Set()
   let cursor
   do {
     const page = await rpc.request('session/list', { cwd, cursor }, { signal: AbortSignal.timeout(20000) })
-    yield page.sessions.filter(row => !cwd || (row.cwd && resolve(row.cwd) === cwd))
-    cursor = page.nextCursor
+    const sessions = Array.isArray(page?.sessions) ? page.sessions : []
+    yield sessions.map(row => row?.cwd ? { ...row, cwd: normalizeWorkspaceCwd(row.cwd) } : row)
+    cursor = page?.nextCursor
     if (cursor && cursors.has(cursor)) throw new Error('Repeated ACP catalog cursor')
     cursors.add(cursor)
   } while (cursor)
 }
 
+async function* catalogPages(rpc, cwd) {
+  let matched = false
+  for await (const page of rawCatalogPages(rpc, cwd)) {
+    const filtered = page.filter(row => !cwd || (row.cwd && resolve(row.cwd) === cwd))
+    if (filtered.length) matched = true
+    yield filtered
+  }
+  // agy may store percent-encoded file:// URIs internally and miss a server-side
+  // cwd filter for non-ASCII paths. Fall back to local filtering when needed.
+  if (cwd && !matched && encodeURI(cwd) !== cwd) {
+    for await (const page of rawCatalogPages(rpc, undefined)) {
+      yield page.filter(row => row.cwd && resolve(row.cwd) === cwd)
+    }
+  }
+}
+
 function summary(s) {
   const updatedAt = Date.parse(s.updatedAt) || 0
   return { id: s.sessionId, backendId: 'antigravity', kind: { kind: 'root' },
-    title: { text: s.title || s.sessionId, source: 'auto' }, cwd: s.cwd, updatedAt,
+    title: { text: s.title || s.sessionId, source: 'auto' }, cwd: normalizeWorkspaceCwd(s.cwd), updatedAt,
     createdAt: updatedAt, hasPrompt: true, childCount: 0 }
 }
 
@@ -34,14 +58,21 @@ async function findSession(rpc, id, cwd) {
     const row = page.find(s => s.sessionId === id)
     if (row) return row
   }
+  if (cwd) {
+    for await (const page of catalogPages(rpc, undefined)) {
+      const row = page.find(s => s.sessionId === id)
+      if (row) return row
+    }
+  }
 }
 
 async function list(scope = {}, onPartial) {
-  const cwd = resolve(scope.cwd ?? process.cwd())
-  const rpc = await connect(cwd)
+  const requested = resolve(normalizeWorkspaceCwd(scope.cwd) ?? process.cwd())
+  const spawnCwd = isDirectory(requested) ? requested : process.cwd()
+  const rpc = await connect(spawnCwd)
   try {
     const rows = []
-    for await (const page of catalogPages(rpc, scope.allProjects ? undefined : cwd)) {
+    for await (const page of catalogPages(rpc, scope.allProjects ? undefined : requested)) {
       for (const item of page) rows.push(summary(item))
       onPartial?.([...rows])
     }
@@ -52,24 +83,25 @@ async function list(scope = {}, onPartial) {
   }
 }
 
-function workspaceSession(dir, agent) {
-  return new Session(dir, { agent, stageAgent: name => nextAgents.set(dir, name) })
+function workspaceSession(dir, agent, prefs) {
+  return new Session(dir, { agent, stageAgent: name => nextAgents.set(dir, name), prefs })
 }
 
-async function resume(target, dir) {
-  const session = workspaceSession(dir)
+async function resume(target, dir, prefs) {
+  const spawnDir = isDirectory(dir) ? dir : process.cwd()
+  const session = workspaceSession(spawnDir, undefined, prefs)
   let rpc
   try {
     rpc = await session.connectAgent()
     // agy may acknowledge a load for a nonexistent ID. Check the live catalog on the
     // same authenticated connection that will replay history.
-    const row = await findSession(rpc, target.sessionId, target.cwd ? dir : undefined)
-    if (!row?.cwd) throw new Error('Cannot locate this session in the native Antigravity catalog.')
-    const workspace = resolve(row.cwd)
-    if (workspace !== dir) {
+    const row = await findSession(rpc, target.sessionId, target.cwd ? spawnDir : undefined)
+    if (!row) throw new Error('Cannot locate this session in the native Antigravity catalog.')
+    const workspace = row.cwd ? resolve(normalizeWorkspaceCwd(row.cwd)) : spawnDir
+    if (workspace !== spawnDir && isDirectory(workspace)) {
       // The child must run in the original workspace for tools and project settings.
       void rpc.close()
-      return resume({ ...target, cwd: workspace }, workspace)
+      return resume({ ...target, cwd: workspace }, workspace, prefs)
     }
   } catch (error) {
     await rpc?.close()
@@ -93,22 +125,11 @@ export const backend = {
   },
   launch: {
     sessionPrefs(host) {
-      const file = host.dataDir && join(host.dataDir, 'last-session')
-      let recent
-      function lastSession() {
-        if (file) {
-          try { return readFileSync(file, 'utf8').trim() || undefined } catch {}
-        }
-        return recent
-      }
-      function setLastSession(id) {
-        if (id.startsWith('signin-')) return
-        recent = id
-        if (!file) return
-        mkdirSync(host.dataDir, { recursive: true })
-        const temp = file + '.' + randomUUID()
-        writeFileSync(temp, id, { mode: 0o600 })
-        renameSync(temp, file)
+      const prefs = createPrefs(host)
+      const lastSession = () => prefs.read().lastSession
+      const setLastSession = id => {
+        if (typeof id !== 'string' || id.startsWith('signin-')) return
+        prefs.write({ lastSession: id || null })
       }
       return { lastSession, setLastSession, touch: setLastSession,
         forget(id) { if (lastSession() === id) setLastSession('') } }
@@ -126,11 +147,15 @@ export const backend = {
     },
     async info(id, cwd) { return (await list({ cwd, allProjects: !cwd })).find(s => s.id === id) },
   },
-  async open(target, host) {
-    if (target.kind === 'resume') return resume(target, resolve(target.cwd ?? host.cwd ?? process.cwd()))
-    const dir = resolve(target.cwd)
+  async open(target, host = {}) {
+    const prefs = createPrefs(host)
+    if (target.kind === 'resume') {
+      const initial = resolve(normalizeWorkspaceCwd(target.cwd) ?? host.cwd ?? process.cwd())
+      return resume(target, initial, prefs)
+    }
+    const dir = resolve(normalizeWorkspaceCwd(target.cwd))
     const agent = nextAgents.get(dir)
-    const session = workspaceSession(dir, agent)
+    const session = workspaceSession(dir, agent, prefs)
     await session.open(target)
     if (!session.needsLogin && agent && nextAgents.get(dir) === agent) nextAgents.delete(dir)
     return session

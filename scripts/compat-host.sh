@@ -31,6 +31,8 @@ case "$1" in
     files=(lib/types/branding.js lib/types/components/{LogoV2,maidPortrait,splashFonts}.js)
     sha256sum "${files[@]}" >"$sandbox/before"
     patches=("$plugin/ui/dsh-tui-0.20.2.patch" "$plugin/ui/portrait-pixels.patch")
+    title="$plugin/ui/title-proportion.patch"
+    if [[ -f "$title" ]]; then patches+=("$title"); fi
     # Probe candidate host files only. Production keeps its explicit version gate.
     shortcut="$plugin/ui/kernel-shortcuts-0.20.2.patch"
     # Published versions before shortcut support carry only the branding patches.

@@ -1,8 +1,26 @@
 import { spawn } from 'node:child_process'
+import { existsSync } from 'node:fs'
 import { Readable, Writable } from 'node:stream'
+import { fileURLToPath } from 'node:url'
 import { ClientApp, ndJsonStream } from '@agentclientprotocol/sdk'
 
 export const executable = () => process.env.ANTIGRAVITY_EXECUTABLE || 'agy'
+
+export function normalizeWorkspaceCwd(raw) {
+  if (typeof raw !== 'string' || !raw) return raw
+  if (raw.startsWith('file://')) {
+    try { return fileURLToPath(raw) } catch {}
+  }
+  if (!/%[0-9A-Fa-f]{2}/.test(raw)) return raw
+  try {
+    const decoded = decodeURIComponent(raw)
+    if (decoded === raw) return raw
+    if (existsSync(decoded) || !existsSync(raw)) return decoded
+    return raw
+  } catch {
+    return raw
+  }
+}
 
 export async function connect(cwd, handlers = {}, directories = [], agent) {
   const app = new ClientApp()

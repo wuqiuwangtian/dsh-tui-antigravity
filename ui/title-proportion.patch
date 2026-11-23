@@ -1,0 +1,44 @@
+diff --git a/lib/types/components/splashFonts.js b/lib/types/components/splashFonts.js
+index 8b4748e..f3a81e2 100644
+--- a/lib/types/components/splashFonts.js
++++ b/lib/types/components/splashFonts.js
+@@ -119,6 +119,25 @@ const SHADOW_GLYPHS = {
+     Y: ['██╗···██╗·', '╚██╗·██╔╝·', '··╚██╔╝···', '···██║····', '···╚═╝····'],
+ };
+ const SHADOW_FALLBACK = ['·▄▄▄▄▄▄▄▄·', '·█······█·', '·█······█·', '·█······█·', '·▀▀▀▀▀▀▀▀·'];
++// Compact 7-column ANSI Shadow glyphs for the 11-letter ANTIGRAVITY title so it
++// stays within the 88-column DEEPSEEK shadow budget and keeps the portrait visible.
++const ANTIGRAVITY_SHADOW_GLYPHS = {
++    A: ['·████╗·', '██╔═██╗', '██████║', '██║·██║', '╚═╝·╚═╝'],
++    E: ['██████╗', '██╔═══╝', '██╔═╝··', '██████╗', '╚═════╝'],
++    G: ['·█████╗', '██╔═══╝', '██║·██╗', '╚█████║', '·╚════╝'],
++    H: ['██╗·██╗', '██║·██║', '██████║', '██║·██║', '╚═╝·╚═╝'],
++    I: ['·████╗·', '·╚██╔╝·', '··██║··', '·████╗·', '·╚═══╝·'],
++    M: ['██╗·██╗', '██████║', '██╔═██║', '██║·██║', '╚═╝·╚═╝'],
++    N: ['██╗·██╗', '███╗██║', '██╔███║', '██║╚██║', '╚═╝·╚═╝'],
++    P: ['█████╗·', '██╔═██╗', '█████╔╝', '██╔══╝·', '╚═╝····'],
++    R: ['█████╗·', '██╔═██╗', '█████╔╝', '██║·██╗', '╚═╝·╚═╝'],
++    S: ['██████╗', '██╔═══╝', '╚═══██║', '██████║', '╚═════╝'],
++    T: ['██████╗', '╚═██╔═╝', '··██║··', '··██║··', '··╚═╝··'],
++    V: ['██╗·██╗', '██║·██║', '██║·██║', '╚████╔╝', '·╚═══╝·'],
++    W: ['██╗·██╗', '██║·██║', '██║███║', '╚███╔█║', '·╚══╝╚╝'],
++    Y: ['██╗·██╗', '╚██╗██╝', '·╚██╔╝·', '··██║··', '··╚═╝··'],
++};
++const ANTIGRAVITY_SHADOW_FALLBACK = ['·▄▄▄▄▄·', '·█···█·', '·█···█·', '·█···█·', '·▀▀▀▀▀·'];
+ const isInk = (cell) => cell === '█' || cell === '▀' || cell === '▄';
+ const applyRows = (rows, fn) => rows.map((row, y) => fn(row, y, rows));
+ const applyTable = (table, fn) => Object.fromEntries(Object.entries(table).map(([ch, rows]) => [ch, applyRows(rows, fn)]));
+@@ -318,6 +337,13 @@ export function resolveSplashTitleFont(font, brand = 'deepseek', egg = null) {
+     if (brand === 'deepseek' && egg === null)
+         return font;
+     const words = BRAND_SPLASH_WORDS[brand];
++    if (brand === 'antigravity') {
++        const bottom = egg?.bottom ?? words.bottom;
++        if (font.id === 'shadow')
++            return withTagline({ ...font, glyphWidth: 7, glyphs: ANTIGRAVITY_SHADOW_GLYPHS, fallback: ANTIGRAVITY_SHADOW_FALLBACK }, words.top, bottom, { uniform: true });
++        if (font.id === 'wide')
++            return withTagline(SPLASH_FONT_TABLE.bold, words.top, bottom, { uniform: true });
++    }
+     return withTagline(font, brand === 'deepseek' ? font.tagline.top : words.top, egg?.bottom ?? words.bottom, brand === 'deepseek' ? undefined : { uniform: true });
+ }
+ /** 半立体的配色不再静态写死：LogoV2 按主题 accent 派生亮/暗两档（金属受光），

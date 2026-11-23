@@ -20,6 +20,7 @@
     "forms.js",
     "mcp.js",
     "management.js",
+    "prefs.js",
     "settings.js",
     "search.js",
     "ui",

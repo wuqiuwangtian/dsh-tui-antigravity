@@ -400,3 +400,182 @@ test('a failed native callback closes the code field, reports failure and leaves
   assert.ok((await s.submit({ text: 'hello', clientMessageId: 'same' })).accepted)
   await s.active
 })
+
+test('percent-encoded non-ASCII workspaces decode in catalog listings and resume without ENOENT', async t => {
+  await start(t)
+  const root = await mkdtemp(join(tmpdir(), 'agy-cjk-'))
+  const chineseDir = join(root, '计算机安全paper02')
+  await mkdir(chineseDir, { recursive: true })
+  t.after(async () => {
+    delete process.env.AGY_FIXTURE_WORKSPACE
+    delete process.env.AGY_FIXTURE_STRICT_LIST
+    await rm(root, { recursive: true, force: true })
+  })
+  process.env.AGY_FIXTURE_WORKSPACE = encodeURI(chineseDir)
+  process.env.AGY_FIXTURE_STRICT_LIST = '1'
+  const all = await backend.catalog.list({ allProjects: true })
+  assert.equal(all[0].cwd, chineseDir)
+  const scoped = await backend.catalog.list({ cwd: chineseDir })
+  assert.deepEqual(scoped.map(s => [s.id, s.cwd]), [['fixture-session', chineseDir]])
+  const resumed = await backend.open({ kind: 'resume', sessionId: 'fixture-session' }, { cwd: process.cwd() })
+  t.after(() => resumed.dispose())
+  assert.equal(resumed.cwd, chineseDir)
+  assert.equal(resumed.status, 'idle')
+})
+
+test('resuming a session whose recorded workspace no longer exists falls back to host cwd instead of ENOENT', async t => {
+  await start(t)
+  const missingDir = join(tmpdir(), 'agy-missing-' + Date.now(), '计算机安全paper02')
+  process.env.AGY_FIXTURE_WORKSPACE = encodeURI(missingDir)
+  t.after(() => { delete process.env.AGY_FIXTURE_WORKSPACE })
+  const resumed = await backend.open({ kind: 'resume', sessionId: 'fixture-session' }, { cwd: process.cwd() })
+  t.after(() => resumed.dispose())
+  assert.equal(resumed.cwd, process.cwd())
+  assert.equal(resumed.status, 'idle')
+})
+
+test('model, reasoning effort, and permission mode persist across restarts without persisting temporary plan mode', async t => {
+  await start(t)
+  const dataDir = await mkdtemp(join(tmpdir(), 'agy-prefs-'))
+  const fixtureConfig = [
+    { id: 'model', currentValue: 'gemini-4-neon', options: [{ value: 'gemini-4-neon', name: 'Gemini 4 Neon' }, { value: 'claude-sonnet', name: 'Claude Sonnet' }] },
+    { id: 'thought_level', currentValue: 'high', options: [{ value: 'high', name: 'High' }, { value: 'medium', name: 'Medium' }] },
+    { id: 'mode', currentValue: 'default', options: [{ value: 'default', name: 'Default' }, { value: 'yolo', name: 'Yolo' }, { value: 'plan', name: 'Plan' }] },
+  ]
+  process.env.AGY_FIXTURE_CONFIG = JSON.stringify(fixtureConfig)
+  t.after(async () => {
+    delete process.env.AGY_FIXTURE_CONFIG
+    await rm(dataDir, { recursive: true, force: true })
+  })
+  const host = { cwd: process.cwd(), dataDir }
+  const first = await backend.open({ kind: 'create', cwd: process.cwd() }, host)
+  try {
+    assert.equal(first.capabilities.models.current().model, 'gemini-4-neon')
+    assert.equal(first.capabilities.effort.current(), 'high')
+    assert.equal(first.capabilities.modes.current(), 'default')
+    await first.capabilities.models.set({ model: 'claude-sonnet' })
+    await first.capabilities.effort.set('medium')
+    await first.capabilities.modes.set('yolo')
+    // Temporary plan mode must not overwrite the saved permission mode, and /plan off restores yolo.
+    await first.capabilities.modes.set('plan')
+    assert.deepEqual(first.capabilities.modes.cycle().map(o => o.id), ['yolo', 'plan'])
+    await first.submit({ text: '/plan off', clientMessageId: 'plan-off' })
+    assert.equal(first.capabilities.modes.current(), 'yolo')
+    await first.capabilities.modes.set('plan')
+  } finally { await first.dispose() }
+
+  // Restart with a fresh create session and a resumed session: both restore claude-sonnet / medium / yolo.
+  for (const target of [{ kind: 'create', cwd: process.cwd() }, { kind: 'resume', sessionId: 'fixture-session', cwd: process.cwd() }]) {
+    const reopened = await backend.open(target, host)
+    try {
+      assert.equal(reopened.capabilities.models.current().model, 'claude-sonnet')
+      assert.equal(reopened.capabilities.effort.current(), 'medium')
+      assert.equal(reopened.capabilities.modes.current(), 'yolo')
+      const ready = (await reopened.history()).find(e => e.type === 'session.ready')
+      assert.equal(ready.model, 'claude-sonnet')
+      assert.equal(ready.effort, 'medium')
+      assert.equal(ready.permissionMode, 'yolo')
+    } finally { await reopened.dispose() }
+  }
+
+  // Unavailable saved options are ignored gracefully without failing open.
+  await writeFile(join(dataDir, 'prefs.json'), JSON.stringify({ model: 'removed-model', effort: 'removed', mode: 'removed' }))
+  const fallback = await backend.open({ kind: 'create', cwd: process.cwd() }, host)
+  try {
+    assert.equal(fallback.capabilities.models.current().model, 'gemini-4-neon')
+    assert.equal(fallback.capabilities.effort.current(), 'high')
+    assert.equal(fallback.capabilities.modes.current(), 'default')
+  } finally { await fallback.dispose() }
+
+  // Legacy last-session file is still readable and cleared on forget().
+  await rm(join(dataDir, 'prefs.json'), { force: true })
+  await writeFile(join(dataDir, 'last-session'), 'legacy-id\n')
+  const sessionPrefs = backend.launch.sessionPrefs(host)
+  assert.equal(sessionPrefs.lastSession(), 'legacy-id')
+  sessionPrefs.forget('legacy-id')
+  assert.equal(sessionPrefs.lastSession(), undefined)
+})
+
+test('tool call and result presentations use short names and structured cards without giant blank headers', async t => {
+  const s = await start(t)
+  const longCmd = 'node -e "const fs = require(\'node:fs\'); console.log(' + 'x'.repeat(180) + ')"\nsecond line'
+  s.update({ sessionUpdate: 'tool_call', toolCallId: 'exec-1', kind: 'execute', title: longCmd, rawInput: { CommandLine: longCmd }, status: 'in_progress' })
+  s.update({ sessionUpdate: 'tool_call_update', toolCallId: 'exec-1', status: 'completed', content: [{ type: 'content', content: { type: 'text', text: 'done output' } }] })
+
+  const insideFile = join(process.cwd(), 'session.js')
+  s.update({ sessionUpdate: 'tool_call', toolCallId: 'read-1', kind: 'read', name: 'read_file', title: 'File ' + insideFile, rawInput: { Path: insideFile }, status: 'in_progress' })
+  s.update({ sessionUpdate: 'tool_call_update', toolCallId: 'read-1', status: 'completed', content: [{ type: 'content', content: { type: 'text', text: 'line1\nline2' } }] })
+
+  s.update({ sessionUpdate: 'tool_call', toolCallId: 'fail-1', kind: 'other', name: 'custom_tool', title: 'Run custom', status: 'failed', content: [{ type: 'content', content: { type: 'text', text: 'boom' } }] })
+
+  const events = await s.history()
+  const execCall = events.find(e => e.type === 'tool.call' && e.callId === 'exec-1')
+  const execResult = events.find(e => e.type === 'tool.result' && e.callId === 'exec-1')
+  assert.equal(execCall.name, 'bash')
+  assert.equal(execCall.presentation.card, 'terminal')
+  assert.equal(execCall.presentation.displayKey, 'tool-name-bash')
+  assert.ok(!execCall.presentation.title.includes('\n'))
+  assert.equal(execResult.presentation.card, 'terminal')
+  assert.equal(execResult.presentation.output, 'done output')
+  assert.equal(execResult.presentation.title, undefined)
+
+  const readCall = events.find(e => e.type === 'tool.call' && e.callId === 'read-1')
+  const readResult = events.find(e => e.type === 'tool.result' && e.callId === 'read-1')
+  assert.equal(readCall.name, 'read')
+  assert.equal(readCall.presentation.card, 'generic')
+  assert.equal(readCall.presentation.title, 'Read session.js')
+  assert.equal(readResult.presentation.card, 'read')
+  assert.equal(readResult.presentation.path, insideFile)
+
+  const failResult = events.find(e => e.type === 'tool.result' && e.callId === 'fail-1')
+  assert.equal(failResult.isError, true)
+  assert.equal(failResult.errorText, 'boom')
+})
+
+test('steer stays pending until confirmed and Esc interrupt does not deadlock on a hung steer RPC', async t => {
+  const s = await start(t)
+  const pendingEvents = []
+  s.subscribe(events => {
+    for (const e of events) if (e.type === 'pending.changed') pendingEvents.push(e)
+  })
+  await s.submit({ text: 'wait', clientMessageId: 'turn-1' })
+  await s.submit({ text: 'steer-hang', clientMessageId: 'steer-1' }, 'steer')
+  // Steer must remain visible in pending (not prematurely claimed) so the UI shows a queued indicator.
+  assert.ok(pendingEvents.some(e => e.items?.some(i => i.id === 'steer-1' && i.placement === 'steer')))
+  assert.ok(!pendingEvents.some(e => e.claimed?.includes('steer-1')))
+  assert.equal((await s.history()).filter(e => e.type === 'user.message').length, 1)
+
+  // Esc with pending message sends cancel('interrupt'): discards backend copy cleanly without hanging.
+  const receipt = await s.cancel('interrupt')
+  assert.deepEqual(receipt, { outcome: 'confirmed', stillQueued: [] })
+  assert.equal(s.status, 'idle')
+  assert.ok(pendingEvents.some(e => e.discarded?.includes('steer-1')))
+})
+
+test('user cancel preserves an unclaimed steer as the next turn, and a failed steer falls back to the queue', async t => {
+  const s = await start(t)
+  await s.submit({ text: 'wait', clientMessageId: 't1' })
+  const notice = observe(s, 'notice', e => e.level === 'info')
+  await s.submit({ text: 'steer-fail', clientMessageId: 's-fail' }, 'steer')
+  await notice
+  const secondEnd = observe(s, 'turn.end', e => e.turn === 2)
+  assert.equal((await s.cancel('user')).outcome, 'confirmed')
+  await secondEnd
+  assert.equal(s.status, 'idle')
+
+  // Unclaimed hung steer survives cancel('user') by moving to the next turn instead of deadlocking.
+  await s.submit({ text: 'wait', clientMessageId: 't3' })
+  await s.submit({ text: 'steer-hang', clientMessageId: 's-hang' }, 'steer')
+  const fourthStart = observe(s, 'turn.start', e => e.turn === 4 && e.userMessageId === 's-hang')
+  assert.equal((await s.cancel('user')).outcome, 'confirmed')
+  await fourthStart
+  await s.cancel('interrupt')
+
+  // When a steer succeeds mid-turn, it is claimed and emitted as a user message.
+  await s.submit({ text: 'wait', clientMessageId: 't5' })
+  const claimed = observe(s, 'pending.changed', e => e.claimed?.includes('s-ok'))
+  await s.submit({ text: 'steer-ok', clientMessageId: 's-ok' }, 'steer')
+  await claimed
+  assert.ok((await s.history()).some(e => e.type === 'user.message' && e.id === 's-ok'))
+  assert.equal((await s.cancel('user')).outcome, 'confirmed')
+})
