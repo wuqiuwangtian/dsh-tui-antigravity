@@ -4,6 +4,7 @@ import { statSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { connect, executable, normalizeWorkspaceCwd } from './connection.js'
 import { createPrefs } from './prefs.js'
+import { chooseWorkspace } from './workspace-choice.js'
 import { Session } from './session.js'
 
 export { normalizeWorkspaceCwd }
@@ -97,8 +98,23 @@ async function resume(target, dir, prefs) {
     // same authenticated connection that will replay history.
     const row = await findSession(rpc, target.sessionId, target.cwd ? spawnDir : undefined)
     if (!row) throw new Error('Cannot locate this session in the native Antigravity catalog.')
-    const workspace = row.cwd ? resolve(row.cwd) : spawnDir
-    if (workspace !== spawnDir && isDirectory(workspace)) {
+    if (!isDirectory(row.cwd)) {
+      void rpc.close()
+      return chooseWorkspace(target.sessionId, row.cwd, spawnDir, async dir => {
+        const chosen = workspaceSession(dir, undefined, prefs)
+        const connection = await chosen.connectAgent()
+        try {
+          const current = await findSession(connection, target.sessionId)
+          if (!current || current.cwd !== row.cwd) throw Error('会话目录或账号已变化，请重新打开会话。')
+          chosen.catalogCwd = row.cwd
+          await chosen.open(target, connection)
+          if (chosen.needsLogin) throw Error('请先登录，再重新打开会话。')
+          return chosen
+        } catch (error) { await connection.close(); throw error }
+      })
+    }
+    const workspace = resolve(row.cwd)
+    if (workspace !== spawnDir) {
       // The child must run in the original workspace for tools and project settings.
       void rpc.close()
       return resume({ ...target, cwd: workspace }, workspace, prefs)

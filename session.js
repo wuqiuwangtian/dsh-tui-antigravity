@@ -168,7 +168,7 @@ export class Session {
       else if (u.sessionUpdate === 'available_commands_update') catalog = u
     })
     try {
-      const targetCwd = resolve(this.cwd)
+      const targetCwd = resolve(this.catalogCwd ?? this.cwd)
       const findInList = async (scopeCwd) => {
         let cursor
         const cursors = new Set()
@@ -182,8 +182,8 @@ export class Session {
           if (!cursor) return false
         }
       }
-      let found = !checkAccount || await findInList(this.cwd)
-      if (!found && encodeURI(this.cwd) !== this.cwd) found = await findInList(undefined)
+      let found = !checkAccount || await findInList(targetCwd)
+      if (!found && encodeURI(targetCwd) !== targetCwd) found = await findInList(undefined)
       if (!found) throw new Error('此账号的会话目录中没有原会话。请运行 /new 开始新会话。')
       const data = await next.request('session/load', { cwd: this.cwd, sessionId: this.id, mcpServers: [], additionalDirectories: directories }, deadline())
       if (this.disposing || (data.sessionId && data.sessionId !== this.id)) throw new Error('会话已关闭或发生变化。')

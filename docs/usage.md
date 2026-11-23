@@ -38,3 +38,5 @@
 | 仍待验证 | 授权失效后的真实恢复、WSL 以外的平台、双真实 Google 账号切换及大规模历史。历史回放可重建 ACP 返回的图片字节；本机 agy 1.5.13 的真实图片对话在恢复时未返回原图，旧图片只在提供字节时可见。动态出现的 ACP 命令只表示原生可调用，一次性定时器、限定两次的重复 cron、读取本地网页和单步动态工作流已有实测。远程业务网页及长期运行的大型工作流尚未逐项实测。 |
 
 对标参考为 [dsh-TUI v0.20.2 的 Codex 后端](https://github.com/ccch1mneyyy/dsh-TUI/blob/v0.20.2/docs/codex-backend.md)、[宿主后端插件契约](https://github.com/ccch1mneyyy/dsh-TUI/tree/v0.20.2/scripts/fixtures/third-party-backend) 和 [Antigravity 官方配额面板](https://antigravity.google/docs/cli/commands/usage)。
+
+恢复旧会话时，如果 agy 记录的原工作区已移动或无法访问，界面会显示原路径。选择使用当前目录，或输入其他目录，再核对完整路径并确认。确认前不会加载旧会话或运行工具。取消后可以输入 `/workspace` 重选，也可以用 `/new` 新建会话。

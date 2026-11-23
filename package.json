@@ -7,6 +7,7 @@
   },
   "files": [
     "backend.js",
+    "workspace-choice.js",
     "artifacts.js",
     "team.js",
     "session.js",

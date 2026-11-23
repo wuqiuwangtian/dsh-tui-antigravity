@@ -444,15 +444,41 @@ test('host paths stay literal and agy catalog paths are decoded only once', asyn
   }
 })
 
-test('resuming a session whose recorded workspace no longer exists falls back to host cwd instead of ENOENT', async t => {
+test('a missing workspace requires confirmation before loading history or running tools', async t => {
   await start(t)
-  const missingDir = join(tmpdir(), 'agy-missing-' + Date.now(), '计算机安全paper02')
-  process.env.AGY_FIXTURE_WORKSPACE = encodeURI(missingDir)
-  t.after(() => { delete process.env.AGY_FIXTURE_WORKSPACE })
-  const resumed = await backend.open({ kind: 'resume', sessionId: 'fixture-session' }, { cwd: process.cwd() })
-  t.after(() => resumed.dispose())
-  assert.equal(resumed.cwd, process.cwd())
-  assert.equal(resumed.status, 'idle')
+  const dir = await mkdtemp(join(tmpdir(), 'agy-relocate-'))
+  const missing = join(dir, 'old')
+  const log = join(dir, 'rpc')
+  process.env.AGY_FIXTURE_WORKSPACE = missing
+  process.env.AGY_FIXTURE_RPC_LOG = log
+  t.after(async () => {
+    delete process.env.AGY_FIXTURE_WORKSPACE
+    delete process.env.AGY_FIXTURE_RPC_LOG
+    await rm(dir, { recursive: true, force: true })
+  })
+  const s = await backend.open({ kind: 'resume', sessionId: 'fixture-session' }, { cwd: process.cwd() })
+  t.after(() => s.dispose())
+  const answer = (event, a) => s.capabilities.questions.respond(event.request.requestId, { answers: [a] })
+  const first = await observe(s, 'question.request')
+  assert.ok(first.request.questions[0].detail.includes(missing))
+  const cancelled = observe(s, 'notice')
+  answer(first, { selected: ['取消'] })
+  await cancelled
+  assert.equal((await s.submit({ text: 'write something' })).accepted, false)
+  assert.doesNotMatch(await readFile(log, 'utf8'), /session\/(load|prompt)/)
+  const retry = observe(s, 'question.request')
+  await s.submit({ text: '/workspace' })
+  const input = observe(s, 'question.request')
+  answer(await retry, { selected: ['输入其他目录'] })
+  const confirm = observe(s, 'question.request', e => e.request.questions[0].question.includes('运行工具'))
+  answer(await input, { custom: dir })
+  const last = await confirm
+  assert.equal(last.request.questions[0].detail, dir)
+  const ready = observe(s, 'session.ready')
+  answer(last, { selected: ['确认恢复'] })
+  await ready
+  assert.equal(s.cwd, dir)
+  assert.ok((await readFile(log, 'utf8')).split('\n').filter(Boolean).map(JSON.parse).some(c => c.cwd === dir && c.method === 'session/load'))
 })
 
 test('model, reasoning effort, and permission mode persist across restarts without persisting temporary plan mode', async t => {
