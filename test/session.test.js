@@ -423,6 +423,27 @@ test('percent-encoded non-ASCII workspaces decode in catalog listings and resume
   assert.equal(resumed.status, 'idle')
 })
 
+test('host paths stay literal and agy catalog paths are decoded only once', async t => {
+  await start(t)
+  const root = await mkdtemp(join(tmpdir(), 'agy-percent-'))
+  const dirs = [join(root, 'team docs'), join(root, 'team%20docs')]
+  t.after(async () => {
+    delete process.env.AGY_FIXTURE_WORKSPACE
+    await rm(root, { recursive: true, force: true })
+  })
+  for (const cwd of dirs) await mkdir(cwd)
+  for (const cwd of dirs) {
+    process.env.AGY_FIXTURE_WORKSPACE = encodeURI(cwd)
+    const rows = await backend.catalog.list({ cwd })
+    assert.deepEqual(rows.map(row => row.cwd), [cwd])
+    assert.deepEqual(await backend.catalog.list({ cwd: dirs.find(dir => dir !== cwd) }), [])
+    for (const target of [{ kind: 'create', cwd }, { kind: 'resume', sessionId: 'fixture-session', cwd }]) {
+      const session = await backend.open(target, { cwd: root })
+      try { assert.equal(session.cwd, cwd) } finally { await session.dispose() }
+    }
+  }
+})
+
 test('resuming a session whose recorded workspace no longer exists falls back to host cwd instead of ENOENT', async t => {
   await start(t)
   const missingDir = join(tmpdir(), 'agy-missing-' + Date.now(), '计算机安全paper02')

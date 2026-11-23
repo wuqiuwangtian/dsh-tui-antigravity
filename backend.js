@@ -49,7 +49,7 @@ async function* catalogPages(rpc, cwd) {
 function summary(s) {
   const updatedAt = Date.parse(s.updatedAt) || 0
   return { id: s.sessionId, backendId: 'antigravity', kind: { kind: 'root' },
-    title: { text: s.title || s.sessionId, source: 'auto' }, cwd: normalizeWorkspaceCwd(s.cwd), updatedAt,
+    title: { text: s.title || s.sessionId, source: 'auto' }, cwd: s.cwd, updatedAt,
     createdAt: updatedAt, hasPrompt: true, childCount: 0 }
 }
 
@@ -67,7 +67,7 @@ async function findSession(rpc, id, cwd) {
 }
 
 async function list(scope = {}, onPartial) {
-  const requested = resolve(normalizeWorkspaceCwd(scope.cwd) ?? process.cwd())
+  const requested = resolve(scope.cwd ?? process.cwd())
   const spawnCwd = isDirectory(requested) ? requested : process.cwd()
   const rpc = await connect(spawnCwd)
   try {
@@ -97,7 +97,7 @@ async function resume(target, dir, prefs) {
     // same authenticated connection that will replay history.
     const row = await findSession(rpc, target.sessionId, target.cwd ? spawnDir : undefined)
     if (!row) throw new Error('Cannot locate this session in the native Antigravity catalog.')
-    const workspace = row.cwd ? resolve(normalizeWorkspaceCwd(row.cwd)) : spawnDir
+    const workspace = row.cwd ? resolve(row.cwd) : spawnDir
     if (workspace !== spawnDir && isDirectory(workspace)) {
       // The child must run in the original workspace for tools and project settings.
       void rpc.close()
@@ -150,10 +150,10 @@ export const backend = {
   async open(target, host = {}) {
     const prefs = createPrefs(host)
     if (target.kind === 'resume') {
-      const initial = resolve(normalizeWorkspaceCwd(target.cwd) ?? host.cwd ?? process.cwd())
+      const initial = resolve(target.cwd ?? host.cwd ?? process.cwd())
       return resume(target, initial, prefs)
     }
-    const dir = resolve(normalizeWorkspaceCwd(target.cwd))
+    const dir = resolve(target.cwd)
     const agent = nextAgents.get(dir)
     const session = workspaceSession(dir, agent, prefs)
     await session.open(target)

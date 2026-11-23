@@ -1,3 +1,4 @@
+import { existsSync } from 'node:fs'
 import { realpath, stat } from 'node:fs/promises'
 import { isAbsolute, join, relative, resolve } from 'node:path'
 import { homedir } from 'node:os'
@@ -1021,9 +1022,14 @@ function singleLine(text) {
   return lines.length > 1 ? first + ' …' : first
 }
 
+// Tool input can contain literal filesystem paths, unlike agy's encoded catalog.
+function toolDisplayPath(path) {
+  return existsSync(path) ? path : normalizeWorkspaceCwd(path)
+}
+
 function displayPath(path, cwd) {
   if (!path) return ''
-  const normalized = normalizeWorkspaceCwd(path)
+  const normalized = toolDisplayPath(path)
   if (!isAbsolute(normalized) || !cwd) return normalized
   const rel = relative(cwd, normalized)
   return rel === '' || rel.startsWith('..') || isAbsolute(rel) ? normalized : rel
@@ -1064,7 +1070,7 @@ function toolCallPresentation(u, cwd) {
     const stripped = singleLine(u.title).replace(/^(?:file|read|view)\s+/iu, '')
     const shown = rawPath ? displayPath(rawPath, cwd) : stripped
     const title = shown ? 'Read ' + shown : singleLine(u.title) || 'Read'
-    return { name: 'read', presentation: { card: 'generic', title, ...(rawPath ? { path: normalizeWorkspaceCwd(rawPath) } : {}), displayKey: 'tool-name-read', category: 'other' } }
+    return { name: 'read', presentation: { card: 'generic', title, ...(rawPath ? { path: toolDisplayPath(rawPath) } : {}), displayKey: 'tool-name-read', category: 'other' } }
   }
   if (u.kind === 'search') {
     const toolName = /web/i.test(u.name ?? '') ? 'web_search' : /glob|find/i.test(u.name ?? '') ? 'glob' : 'grep'
@@ -1077,7 +1083,7 @@ function toolCallPresentation(u, cwd) {
     const rawPath = toolPath(u)
     const label = u.kind === 'edit' ? 'Edit' : u.kind === 'delete' ? 'Delete' : 'Move'
     const title = singleLine(u.title) || (rawPath ? `${label} ${displayPath(rawPath, cwd)}` : label)
-    return { name: u.kind, presentation: { card: 'generic', title, ...(rawPath ? { path: normalizeWorkspaceCwd(rawPath) } : {}), ...(u.kind === 'edit' ? { displayKey: 'tool-name-edit' } : {}), category: 'mutate' } }
+    return { name: u.kind, presentation: { card: 'generic', title, ...(rawPath ? { path: toolDisplayPath(rawPath) } : {}), ...(u.kind === 'edit' ? { displayKey: 'tool-name-edit' } : {}), category: 'mutate' } }
   }
   const name = shortToolName(u)
   const title = singleLine(u.title) || name
@@ -1100,7 +1106,7 @@ function toolResultPresentation(u, text, cwd) {
     const stripped = singleLine(u.title).replace(/^(?:file|read|view)\s+/iu, '')
     const shown = rawPath ? displayPath(rawPath, cwd) : stripped
     const title = shown ? 'Read ' + shown : singleLine(u.title) || 'Read'
-    return { card: 'read', title, ...(rawPath ? { path: normalizeWorkspaceCwd(rawPath) } : {}), content: text ? [{ type: 'text', text }] : [], displayKey: 'tool-name-read', category: 'other' }
+    return { card: 'read', title, ...(rawPath ? { path: toolDisplayPath(rawPath) } : {}), content: text ? [{ type: 'text', text }] : [], displayKey: 'tool-name-read', category: 'other' }
   }
   return toolCallPresentation(u, cwd).presentation
 }

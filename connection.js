@@ -1,5 +1,4 @@
 import { spawn } from 'node:child_process'
-import { existsSync } from 'node:fs'
 import { Readable, Writable } from 'node:stream'
 import { fileURLToPath } from 'node:url'
 import { ClientApp, ndJsonStream } from '@agentclientprotocol/sdk'
@@ -13,10 +12,7 @@ export function normalizeWorkspaceCwd(raw) {
   }
   if (!/%[0-9A-Fa-f]{2}/.test(raw)) return raw
   try {
-    const decoded = decodeURIComponent(raw)
-    if (decoded === raw) return raw
-    if (existsSync(decoded) || !existsSync(raw)) return decoded
-    return raw
+    return decodeURIComponent(raw)
   } catch {
     return raw
   }
