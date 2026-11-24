@@ -40,3 +40,5 @@
 对标参考为 [dsh-TUI v0.20.2 的 Codex 后端](https://github.com/ccch1mneyyy/dsh-TUI/blob/v0.20.2/docs/codex-backend.md)、[宿主后端插件契约](https://github.com/ccch1mneyyy/dsh-TUI/tree/v0.20.2/scripts/fixtures/third-party-backend) 和 [Antigravity 官方配额面板](https://antigravity.google/docs/cli/commands/usage)。
 
 恢复旧会话时，如果 agy 记录的原工作区已移动或无法访问，界面会显示原路径。选择使用当前目录，或输入其他目录，再核对完整路径并确认。确认前不会加载旧会话或运行工具。取消后可以输入 `/workspace` 重选，也可以用 `/new` 新建会话。
+
+在权限选择器中选中 `Full access` 后，插件会用 agy 的 `--dangerously-skip-permissions` 重新连接当前会话，自动批准工具权限请求。同一 dsh-tui profile 会记住模型、思考强度和权限选择，包括在其他项目新建或恢复会话时。切回普通权限模式同样需要重连；如需让下一条消息使用新权限，请等界面显示新模式后再发送。
