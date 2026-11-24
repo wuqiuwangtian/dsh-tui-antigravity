@@ -41,6 +41,7 @@ for await (const line of createInterface({ input: process.stdin })) {
   if (method && process.env.AGY_FIXTURE_RPC_LOG) {
     appendFileSync(process.env.AGY_FIXTURE_RPC_LOG, JSON.stringify({
       pid: process.pid, method, cwd: process.cwd(),
+      skipPermissions: process.argv.includes('--dangerously-skip-permissions'),
       ...(params?.configId ? { configId: params.configId, value: params.value } : {}),
     }) + '\n')
   }

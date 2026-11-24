@@ -34,6 +34,12 @@ async function credentialStamp() {
 }
 const reportLabels = { ...reports, ...sessionReports }
 const actionLabels = { ...managers, team: '读取当前会话的子代理回复', folders: '本次会话的附加目录', codesearch: '搜索当前工作区', artifacts: '预览当前会话的 Markdown 产物' }
+const FULL_ACCESS_MODE = 'full-access'
+const fullAccessOption = {
+  id: FULL_ACCESS_MODE,
+  label: 'Full access',
+  description: 'Auto-approve all tool permission requests (--dangerously-skip-permissions); explicit selection only.',
+}
 const deadline = () => ({ signal: AbortSignal.timeout(30000) })
 
 export class Session {
@@ -43,6 +49,7 @@ export class Session {
     this.stageAgent = stageAgent
     this.prefs = prefs
     this.baseMode = prefs?.read().mode
+    this.skipPermissions = this.baseMode === FULL_ACCESS_MODE
     this.status = 'starting'
     this.events = []
     this.listeners = new Set()
@@ -79,6 +86,7 @@ export class Session {
         'Antigravity ACP ' + (this.rpc?.hello.agentInfo?.version ?? ''),
         'Workspace: ' + this.cwd,
         'Session: ' + (this.id ?? ''),
+        ...(this.skipPermissions ? ['Permissions: full-access (--dangerously-skip-permissions)'] : []),
       ] },
     }
   }
@@ -106,7 +114,7 @@ export class Session {
       }
       this.events.unshift({ type: 'session.ready', sessionId: this.id, cwd: this.cwd,
         model: this.option('model')?.currentValue ?? '', provider: 'Antigravity',
-        effort: this.option('thought_level')?.currentValue, permissionMode: this.option('mode')?.currentValue })
+        effort: this.option('thought_level')?.currentValue, permissionMode: this.currentMode() })
       this.setStatus('idle')
       if (!loading) this.openingEvents = this.events.slice()
       this.watchConnection(this.rpc)
@@ -120,12 +128,12 @@ export class Session {
     }
   }
 
-  connectAgent(directories = this.directories, receive = u => this.update(u)) {
+  connectAgent(directories = this.directories, receive = u => this.update(u), skipPermissions = this.skipPermissions) {
     return connect(this.cwd, {
       update: p => { if (!this.id || this.id === p.sessionId) receive(p.update) },
       elicit: (p, signal) => this.elicit(p, signal),
       permission: (p, signal) => this.permission(p, signal),
-    }, directories, this.agent)
+    }, directories, this.agent, { skipPermissions })
   }
 
   watchConnection(rpc) {
@@ -154,19 +162,20 @@ export class Session {
     this.openingEvents = [{ type: 'notice', level: 'info', text: this.authHint }]
   }
 
-  async reconnect(directories = this.directories, checkAccount = true) {
+  async reconnect(directories = this.directories, checkAccount = true, options = {}) {
     if (!this.id || this.needsLogin) return
     if (!checkAccount && this.authHint) throw new Error(this.authHint)
     let attached = false, catalog
+    const nextSkipPermissions = options.skipPermissions ?? this.skipPermissions
     const activePrefs = {
       model: this.option('model')?.currentValue ?? this.prefs?.read().model,
       effort: this.option('thought_level')?.currentValue ?? this.prefs?.read().effort,
-      mode: this.option('mode')?.currentValue ?? this.prefs?.read().mode,
+      mode: options.mode ?? (nextSkipPermissions ? FULL_ACCESS_MODE : this.option('mode')?.currentValue ?? this.prefs?.read().mode),
     }
     const next = await this.connectAgent(directories, u => {
       if (attached) this.update(u)
       else if (u.sessionUpdate === 'available_commands_update') catalog = u
-    })
+    }, nextSkipPermissions)
     try {
       const targetCwd = resolve(this.catalogCwd ?? this.cwd)
       const findInList = async (scopeCwd) => {
@@ -188,6 +197,7 @@ export class Session {
       const data = await next.request('session/load', { cwd: this.cwd, sessionId: this.id, mcpServers: [], additionalDirectories: directories }, deadline())
       if (this.disposing || (data.sessionId && data.sessionId !== this.id)) throw new Error('会话已关闭或发生变化。')
       const old = this.rpc
+      this.skipPermissions = nextSkipPermissions
       this.configureAccount(data)
       this.configure(data.configOptions ?? [])
       await this.applySavedPrefs(activePrefs, next)
@@ -205,7 +215,7 @@ export class Session {
     this.emit({ type: 'session.ready', sessionId: this.id, cwd: this.cwd,
       model: this.option('model')?.currentValue ?? '',
       effort: this.option('thought_level')?.currentValue,
-      permissionMode: this.option('mode')?.currentValue })
+      permissionMode: this.currentMode() })
   }
 
   async login(action = new AbortController()) {
@@ -474,6 +484,19 @@ export class Session {
 
   option(id) { return this.settings?.find(s => s.id === id) }
   choices(id) { return (this.option(id)?.options ?? []).flatMap(o => o.options ?? [o]).map(o => ({ id: o.value, label: o.name, description: o.description })) }
+  modeChoices() {
+    const native = this.choices('mode')
+    if (!native.length || native.some(o => o.id === FULL_ACCESS_MODE)) return native
+    const planIndex = native.findIndex(o => o.id === 'plan')
+    if (planIndex < 0) return [...native, fullAccessOption]
+    return [...native.slice(0, planIndex), fullAccessOption, ...native.slice(planIndex)]
+  }
+  currentMode() {
+    const acpMode = this.option('mode')?.currentValue
+    if (!acpMode) return undefined
+    if (acpMode === 'plan') return 'plan'
+    return this.skipPermissions ? FULL_ACCESS_MODE : acpMode
+  }
   configure(settings) {
     this.settings = settings
     for (const [id, capability] of [['model', 'models'], ['thought_level', 'effort'], ['mode', 'modes']]) {
@@ -491,13 +514,14 @@ export class Session {
       set: id => this.setOption('thought_level', id),
     }
     if (this.option('mode')) {
-      const currentMode = this.option('mode').currentValue
-      if (currentMode && currentMode !== 'plan') this.baseMode = currentMode
+      const activeMode = this.currentMode()
+      if (activeMode && activeMode !== 'plan') this.baseMode = activeMode
       this.capabilities.modes = {
-        current: () => this.option('mode').currentValue, list: () => this.choices('mode'),
+        current: () => this.currentMode(), list: () => this.modeChoices(),
         cycle: () => {
-          const base = this.baseMode && this.choices('mode').some(o => o.id === this.baseMode) ? this.baseMode : 'default'
-          return this.choices('mode').filter(o => o.id === base || o.id === 'plan')
+          const all = this.modeChoices()
+          const base = this.baseMode && all.some(o => o.id === this.baseMode) ? this.baseMode : 'default'
+          return all.filter(o => o.id === base || o.id === 'plan')
         },
         set: id => this.setOption('mode', id),
       }
@@ -506,7 +530,8 @@ export class Session {
   async applySavedPrefs(saved = this.prefs?.read(), rpc = this.rpc) {
     if (!saved || !rpc || !this.id) return
     // Apply model first because switching models can change available thought_level options.
-    for (const [id, value] of [['model', saved.model], ['thought_level', saved.effort], ['mode', saved.mode]]) {
+    const desiredMode = saved.mode === FULL_ACCESS_MODE ? (this.option('mode')?.currentValue === 'plan' ? 'default' : undefined) : saved.mode
+    for (const [id, value] of [['model', saved.model], ['thought_level', saved.effort], ['mode', desiredMode]]) {
       if (!value) continue
       const current = this.option(id)?.currentValue
       if (!this.option(id) || current === value) continue
@@ -519,10 +544,40 @@ export class Session {
   }
   async setOption(id, value) {
     if (this.authHint) throw new Error(this.authHint)
-    if (!this.choices(id).some(o => o.id === value)) throw new Error('Unavailable Antigravity option')
+    if (id === 'mode') {
+      if (!this.modeChoices().some(o => o.id === value)) throw new Error('Unavailable Antigravity option')
+      if (value === FULL_ACCESS_MODE) {
+        if (this.skipPermissions) {
+          if (this.option('mode')?.currentValue === 'plan') {
+            const result = await this.rpc.request('session/set_config_option', { sessionId: this.id, configId: 'mode', value: 'default' }, deadline())
+            this.configure(result.configOptions)
+          }
+        } else {
+          if (this.status !== 'idle') throw new Error('请先结束当前回合再切换完全权限模式。')
+          await this.reconnect(this.directories, false, { skipPermissions: true, mode: FULL_ACCESS_MODE })
+        }
+        this.baseMode = FULL_ACCESS_MODE
+        this.prefs?.write({ mode: FULL_ACCESS_MODE })
+        this.emit({ type: 'mode.changed', modeId: FULL_ACCESS_MODE })
+        return
+      }
+      if (value !== 'plan' && this.skipPermissions) {
+        if (this.status !== 'idle') throw new Error('请先结束当前回合再退出完全权限模式。')
+        await this.reconnect(this.directories, false, { skipPermissions: false, mode: value })
+        const actual = this.currentMode()
+        if (actual && actual !== 'plan') {
+          this.baseMode = actual
+          this.prefs?.write({ mode: actual })
+        }
+        this.emit({ type: 'mode.changed', modeId: actual })
+        return
+      }
+    } else if (!this.choices(id).some(o => o.id === value)) {
+      throw new Error('Unavailable Antigravity option')
+    }
     const result = await this.rpc.request('session/set_config_option', { sessionId: this.id, configId: id, value }, deadline())
     this.configure(result.configOptions)
-    const actual = this.option(id)?.currentValue
+    const actual = id === 'mode' ? this.currentMode() : this.option(id)?.currentValue
     if (id === 'model') {
       if (actual) this.prefs?.write({ model: actual })
       this.emit({ type: 'model.changed', model: actual, source: 'user' })
@@ -816,7 +871,7 @@ export class Session {
     if (/^\/plan(?:\s+(?:on|off))?$/.test(text) && this.capabilities.modes) {
       if (this.status !== 'idle') return { accepted: false, dropped: true, reason: '请先结束当前回合再切换模式。' }
       const argument = text.slice(5).trim()
-      const fallback = this.baseMode && this.choices('mode').some(o => o.id === this.baseMode) ? this.baseMode : 'default'
+      const fallback = this.baseMode && this.modeChoices().some(o => o.id === this.baseMode) ? this.baseMode : 'default'
       await this.setOption('mode', argument === 'off' ? fallback : 'plan')
       this.pending({ claimed: [input.clientMessageId] })
       return { accepted: true }

@@ -626,3 +626,80 @@ test('user cancel preserves an unclaimed steer as the next turn, and a failed st
   assert.ok((await s.history()).some(e => e.type === 'user.message' && e.id === 's-ok'))
   assert.equal((await s.cancel('user')).outcome, 'confirmed')
 })
+
+test('full-access mode restarts agy with --dangerously-skip-permissions, persists across restarts, and stays out of Shift+Tab by default', async t => {
+  await start(t)
+  const dir = await mkdtemp(join(tmpdir(), 'agy-full-access-'))
+  const log = join(dir, 'rpc-log')
+  const fixtureConfig = [
+    { id: 'model', currentValue: 'gemini-4-neon', options: [{ value: 'gemini-4-neon', name: 'Gemini 4 Neon' }] },
+    { id: 'mode', currentValue: 'default', options: [
+      { value: 'default', name: 'Default' },
+      { value: 'accept-edits', name: 'Accept edits' },
+      { value: 'auto', name: 'Auto' },
+      { value: 'plan', name: 'Plan' },
+    ] },
+  ]
+  process.env.AGY_FIXTURE_CONFIG = JSON.stringify(fixtureConfig)
+  process.env.AGY_FIXTURE_RPC_LOG = log
+  t.after(async () => {
+    delete process.env.AGY_FIXTURE_CONFIG
+    delete process.env.AGY_FIXTURE_RPC_LOG
+    await rm(dir, { recursive: true, force: true })
+  })
+  const host = { cwd: process.cwd(), dataDir: dir }
+  const readLog = async () => (await readFile(log, 'utf8')).trim().split('\n').filter(Boolean).map(line => JSON.parse(line))
+
+  // 1. Default session exposes full-access in /permission list, but Shift+Tab cycle excludes it.
+  await writeFile(log, '')
+  const first = await backend.open({ kind: 'create', cwd: process.cwd() }, host)
+  try {
+    assert.deepEqual(first.capabilities.modes.list().map(o => o.id), ['default', 'accept-edits', 'auto', 'full-access', 'plan'])
+    assert.deepEqual(first.capabilities.modes.cycle().map(o => o.id), ['default', 'plan'])
+    assert.equal(first.capabilities.modes.current(), 'default')
+    assert.equal((await readLog()).at(-1).skipPermissions, false)
+
+    // Cannot toggle full-access while a turn is running.
+    await first.submit({ text: 'wait', clientMessageId: 'busy' })
+    await assert.rejects(first.capabilities.modes.set('full-access'), /结束当前回合/)
+    await first.cancel('user')
+
+    // 2. Selecting full-access reconnects agy acp with --dangerously-skip-permissions on the same session ID.
+    await writeFile(log, '')
+    await first.capabilities.modes.set('full-access')
+    assert.equal(first.capabilities.modes.current(), 'full-access')
+    assert.deepEqual(first.capabilities.modes.cycle().map(o => o.id), ['full-access', 'plan'])
+    assert.ok(first.capabilities.diagnostics.lines().some(l => l.includes('--dangerously-skip-permissions')))
+    const enterCalls = await readLog()
+    assert.ok(enterCalls.some(c => c.method === 'session/load' && c.skipPermissions === true))
+
+    // 3. Entering and leaving /plan from full-access stays on the same process without respawning.
+    await writeFile(log, '')
+    await first.capabilities.modes.set('plan')
+    assert.equal(first.capabilities.modes.current(), 'plan')
+    await first.submit({ text: '/plan off', clientMessageId: 'plan-off' })
+    assert.equal(first.capabilities.modes.current(), 'full-access')
+    const planCalls = await readLog()
+    assert.ok(!planCalls.some(c => c.method === 'initialize'))
+  } finally { await first.dispose() }
+
+  // 4. Restarting with persisted full-access launches directly with --dangerously-skip-permissions.
+  await writeFile(log, '')
+  const restarted = await backend.open({ kind: 'create', cwd: process.cwd() }, host)
+  try {
+    assert.equal(restarted.capabilities.modes.current(), 'full-access')
+    const ready = (await restarted.history()).find(e => e.type === 'session.ready')
+    assert.equal(ready.permissionMode, 'full-access')
+    const bootCalls = await readLog()
+    assert.equal(new Set(bootCalls.map(c => c.pid)).size, 1)
+    assert.ok(bootCalls.every(c => c.skipPermissions === true))
+
+    // 5. Leaving full-access for auto reconnects WITHOUT --dangerously-skip-permissions and updates prefs.
+    await writeFile(log, '')
+    await restarted.capabilities.modes.set('auto')
+    assert.equal(restarted.capabilities.modes.current(), 'auto')
+    const exitCalls = await readLog()
+    assert.ok(exitCalls.some(c => c.method === 'session/load' && c.skipPermissions === false))
+    assert.ok(exitCalls.some(c => c.method === 'session/set_config_option' && c.configId === 'mode' && c.value === 'auto'))
+  } finally { await restarted.dispose() }
+})
