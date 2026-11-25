@@ -73,6 +73,39 @@ test('unifiedDiffPatch handles insertions, deletions, EOF newlines, CRLF, identi
   assert.ok(!crlf.includes('\r'))
   assert.equal(crlf, '@@ -1,3 +1,3 @@\n a\n-b\n+B\n c\n')
 
+  // Mixed CRLF <-> LF conversion during a localized edit does not diff unchanged lines
+  const lines100 = Array.from({ length: 100 }, (_, i) => `line ${i + 1}`)
+  const edited100 = [...lines100]
+  edited100[88] = 'line 89 edited'
+  const crlfToLf = unifiedDiffPatch(lines100.join('\r\n') + '\r\n', edited100.join('\n') + '\n')
+  assert.equal(crlfToLf, [
+    '@@ -86,7 +86,7 @@',
+    ' line 86',
+    ' line 87',
+    ' line 88',
+    '-line 89',
+    '+line 89 edited',
+    ' line 90',
+    ' line 91',
+    ' line 92',
+    '',
+  ].join('\n'))
+  assert.equal(unifiedDiffPatch(lines100.join('\n') + '\n', edited100.join('\r\n') + '\r\n'), crlfToLf)
+  assert.equal(unifiedDiffPatch(lines100.join('\r\n') + '\r\n', lines100.join('\n') + '\n'), '')
+
+  // CRLF -> LF still detects an EOF trailing-newline difference on the last line only
+  const crlfEof = unifiedDiffPatch(lines100.join('\r\n') + '\r\n', lines100.join('\n'))
+  assert.equal(crlfEof, [
+    '@@ -97,4 +97,4 @@',
+    ' line 97',
+    ' line 98',
+    ' line 99',
+    '-line 100',
+    '+line 100',
+    '\\ No newline at end of file',
+    '',
+  ].join('\n'))
+
   // Over-budget fallback still trims unchanged prefix/suffix and keeps valid counts
   const bigOld = Array.from({ length: 50 }, (_, i) => i < 20 || i >= 30 ? `keep ${i + 1}` : `old ${i + 1}`).join('\n') + '\n'
   const bigNew = Array.from({ length: 50 }, (_, i) => i < 20 || i >= 30 ? `keep ${i + 1}` : `new ${i + 1}`).join('\n') + '\n'

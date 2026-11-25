@@ -12,7 +12,11 @@ function splitLines(text) {
       lines.push(text.slice(start))
       break
     }
-    lines.push(text.slice(start, nl + 1))
+    // Normalize CRLF to LF for line comparison so whole-file line-ending
+    // conversions do not mask localized edits, while keeping '\n' to preserve
+    // trailing-newline differences at EOF.
+    const end = nl > start && text.charCodeAt(nl - 1) === 13 ? nl - 1 : nl
+    lines.push(text.slice(start, end) + '\n')
     start = nl + 1
   }
   return lines
