@@ -804,8 +804,8 @@ test('local image attachments use content-hashed IDs, detected mediaType, versio
   const s = await backend.open({ kind: 'create', cwd: workspace }, { cwd: workspace })
   t.after(() => s.dispose())
 
-  // Four-space and tab indented Markdown examples (including right after a heading)
-  // and tilde fences inside blockquotes must not attach images.
+  // Four-space and tab indented Markdown examples (including right after a heading),
+  // tilde fences inside blockquotes, and `>` lines inside fenced code blocks must not attach images.
   const docsExample = [
     '# Markdown 写法示例',
     '    ![after-heading](preview.png)',
@@ -816,8 +816,22 @@ test('local image attachments use content-hashed IDs, detected mediaType, versio
     '> ~~~md',
     '> ![quoted-fence](preview.png)',
     '> ~~~',
+    '',
+    '~~~md',
+    '> ![](preview.png)',
+    '~~~',
   ].join('\n')
   s.update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: docsExample } })
+  s.flush()
+
+  // A `>` line inside a fenced code block must not break fence closing and swallow a real image after it.
+  const fenceThenReal = [
+    '~~~md',
+    '> example',
+    '~~~',
+    '![after-quoted-code](preview.png)',
+  ].join('\n')
+  s.update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: fenceThenReal } })
   s.flush()
 
   // Repeated references to the same image in one message deduplicate before hashing
@@ -829,11 +843,30 @@ test('local image attachments use content-hashed IDs, detected mediaType, versio
   s.update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: '![v2](preview.png)' } })
   s.flush()
 
-  const replies = (await s.history()).filter(e => e.type === 'assistant.message')
+  // Duplicate ACP resource_link entries in both assistant chunks and tool results deduplicate
+  // before hashing/reading, keeping a single attachment.
+  const targetUri = pathToFileURL(target).href
+  for (let i = 0; i < 5; i++) {
+    s.update({ sessionUpdate: 'agent_message_chunk', content: { type: 'resource_link', name: 'link-' + i, uri: targetUri } })
+  }
+  s.flush()
+  s.update({
+    sessionUpdate: 'tool_call',
+    toolCallId: 'dup-links',
+    kind: 'other',
+    name: 'image_tool',
+    status: 'completed',
+    content: Array.from({ length: 5 }, (_, i) => ({ type: 'content', content: { type: 'resource_link', name: 'tool-link-' + i, uri: targetUri } })),
+  })
+
+  const history = await s.history()
+  const replies = history.filter(e => e.type === 'assistant.message')
   assert.equal(replies[0].images, undefined)
   assert.equal(replies[1].images.length, 1)
-  const [v1] = replies[1].images
-  const [v2] = replies[2].images
+  assert.equal(replies[1].images[0].name, 'after-quoted-code')
+  assert.equal(replies[2].images.length, 1)
+  const [v1] = replies[2].images
+  const [v2] = replies[3].images
   assert.notEqual(v1.id, v2.id)
   assert.equal(v1.mediaType, 'image/png')
   assert.equal(v1.bytes, png.length)
@@ -842,6 +875,11 @@ test('local image attachments use content-hashed IDs, detected mediaType, versio
   // v1 detects that the underlying file was overwritten; v2 reads the exact current bytes.
   await assert.rejects(v1.read(), /changed since it was recorded/)
   assert.deepEqual(Buffer.from(await v2.read()), gif)
+  assert.equal(replies[4].images.length, 1)
+  assert.equal(replies[4].images[0].name, 'link-0')
+  const dupLinkTool = history.find(e => e.type === 'tool.result' && e.callId === 'dup-links')
+  assert.equal(dupLinkTool.images.length, 1)
+  assert.equal(dupLinkTool.images[0].name, 'tool-link-0')
 
   // Replacing a parent directory with a symlink pointing outside the workspace
   // is rejected by handle verification even if the symlink target has matching bytes.

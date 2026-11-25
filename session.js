@@ -57,6 +57,7 @@ export class Session {
     this.tools = new Map()
     this.blocks = []
     this.replyImages = []
+    this.replyImagePaths = new Set()
     this.queue = []
     this.directories = []
     this.steered = new Map()
@@ -644,16 +645,16 @@ export class Session {
     const seq = ++this.seq
     const text = this.blocks.filter(b => b.type === 'text').map(b => b.text).join('')
     const images = [...this.replyImages]
-    const seen = new Set(images.map(img => img.path).filter(Boolean))
     const remaining = Math.max(0, 8 - images.length)
     if (remaining > 0) {
-      images.push(...markdownImages(text, this.imageContext(), remaining, seen))
+      images.push(...markdownImages(text, this.imageContext(), remaining, this.replyImagePaths))
     }
     this.emit({ type: 'assistant.message', seq, anchor: String(seq), turn: this.turn, step: this.step,
       attemptId: this.attempt, time: Date.now(), blocks: this.blocks, images: images.length ? images : undefined, canonical: true })
     this.emit({ type: 'assistant.attempt.end', attemptId: this.attempt, outcome: 'committed', turn: this.turn, step: this.step })
     this.blocks = []
     this.replyImages = []
+    this.replyImagePaths = new Set()
   }
   user(text, id, blocks, images) {
     this.flush()
@@ -692,7 +693,7 @@ export class Session {
       case 'agent_thought_chunk': {
         const image = u.content?.type === 'image' ? transcriptImage(u.content) : undefined
         const linkedImage = u.sessionUpdate === 'agent_message_chunk' && u.content?.type === 'resource_link' && u.content.uri
-          ? localTranscriptImage(u.content.uri, { ...this.imageContext(), name: u.content.name }) : undefined
+          ? localTranscriptImage(u.content.uri, { ...this.imageContext(), name: u.content.name, seen: this.replyImagePaths }) : undefined
         const text = contentText(u.content)
         if (!image && !linkedImage && !text) return
         const kind = u.sessionUpdate === 'agent_message_chunk' ? 'text' : 'reasoning'
@@ -701,9 +702,7 @@ export class Session {
           this.emit({ type: 'assistant.attempt.start', attemptId: this.attempt, turn: this.turn, step: ++this.step })
         }
         if (image) { this.replyImages.push(image); break }
-        if (linkedImage && !this.replyImages.some(existing => existing.path === linkedImage.path)) {
-          this.replyImages.push(linkedImage)
-        }
+        if (linkedImage && this.replyImages.length < 8) this.replyImages.push(linkedImage)
         if (!text) break
         if (this.blocks.at(-1)?.type !== kind) this.blocks.push({ type: kind, text: '' })
         this.blocks.at(-1).text += text
@@ -784,8 +783,8 @@ export class Session {
           const img = transcriptImage(item.content)
           if (img) images.push(img)
         } else if (item.content?.type === 'resource_link' && item.content.uri) {
-          const img = localTranscriptImage(item.content.uri, { ...context, name: item.content.name })
-          if (img && !seenPaths.has(img.path)) { seenPaths.add(img.path); images.push(img) }
+          const img = localTranscriptImage(item.content.uri, { ...context, name: item.content.name, seen: seenPaths })
+          if (img) images.push(img)
         }
       }
       if (!isError && !images.length && (call.kind === 'read' || /^(?:read_file|view_file)$/i.test(call.name ?? ''))) {

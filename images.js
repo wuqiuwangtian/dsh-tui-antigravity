@@ -222,6 +222,10 @@ export function localTranscriptImage(rawPath, context = {}) {
   const roots = context.roots ?? allowedImageRoots(context)
   const real = resolveAllowedRealPath(rawPath, { cwd: context.cwd, roots })
   if (!real) return undefined
+  if (context.seen) {
+    if (context.seen.has(real)) return undefined
+    context.seen.add(real)
+  }
   return buildLocalFacade(real, roots, context.name)
 }
 
@@ -235,10 +239,10 @@ function leadingColumns(line) {
   return cols
 }
 
-function peelBlockquotes(line) {
+function peelBlockquotes(line, maxDepth = Infinity) {
   let depth = 0
   let rest = line
-  while (true) {
+  while (depth < maxDepth) {
     const match = /^ {0,3}>[ \t]?/.exec(rest)
     if (!match) break
     depth += 1
@@ -255,21 +259,30 @@ function stripMarkdownCode(text) {
   let inParagraph = false
   let listIndent
   for (const rawLine of lines) {
-    const { depth, text: line } = peelBlockquotes(rawLine)
-    if (depth !== quoteDepth) {
-      quoteDepth = depth
+    if (fence) {
+      // Only blockquote prefixes belonging to the fence's own enclosing quotes
+      // are structural; any deeper `>` belongs to literal code inside the fence.
+      const { depth, text: inner } = peelBlockquotes(rawLine, fence.quoteDepth)
+      if (depth >= fence.quoteDepth) {
+        const close = new RegExp('^ {0,3}' + fence.ch + '{' + fence.len + ',}[ \\t]*$')
+        if (close.test(inner)) fence = undefined
+        continue
+      }
+      // Enclosing blockquote ended before a closing fence; fall through to parse this line.
       fence = undefined
+      quoteDepth = depth
       inParagraph = false
       listIndent = undefined
     }
-    if (fence) {
-      const close = new RegExp('^ {0,3}' + fence[0] + '{' + fence.length + ',}[ \\t]*$')
-      if (close.test(line)) fence = undefined
-      continue
+    const { depth, text: line } = peelBlockquotes(rawLine)
+    if (depth !== quoteDepth) {
+      quoteDepth = depth
+      inParagraph = false
+      listIndent = undefined
     }
     const open = /^ {0,3}(`{3,}|~{3,})/.exec(line)
     if (open) {
-      fence = open[1]
+      fence = { ch: open[1][0], len: open[1].length, quoteDepth: depth }
       inParagraph = false
       continue
     }
@@ -314,10 +327,7 @@ export function markdownImages(text, context = {}, limit = MAX_IMAGES_PER_MESSAG
   for (const match of cleaned.matchAll(MARKDOWN_IMAGE)) {
     const alt = match[1]
     const href = match[2] ?? match[3]
-    const real = resolveAllowedRealPath(href, { cwd: context.cwd, roots })
-    if (!real || seen.has(real)) continue
-    seen.add(real)
-    const image = buildLocalFacade(real, roots, alt)
+    const image = localTranscriptImage(href, { ...context, roots, name: alt, seen })
     if (!image) continue
     images.push(image)
     if (images.length >= limit) break
