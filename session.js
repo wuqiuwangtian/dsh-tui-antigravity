@@ -692,7 +692,7 @@ export class Session {
       case 'agent_message_chunk':
       case 'agent_thought_chunk': {
         const image = u.content?.type === 'image' ? transcriptImage(u.content) : undefined
-        const linkedImage = u.sessionUpdate === 'agent_message_chunk' && u.content?.type === 'resource_link' && u.content.uri
+        const linkedImage = u.sessionUpdate === 'agent_message_chunk' && u.content?.type === 'resource_link' && u.content.uri && this.replyImages.length < 8
           ? localTranscriptImage(u.content.uri, { ...this.imageContext(), name: u.content.name, seen: this.replyImagePaths }) : undefined
         const text = contentText(u.content)
         if (!image && !linkedImage && !text) return
@@ -702,7 +702,7 @@ export class Session {
           this.emit({ type: 'assistant.attempt.start', attemptId: this.attempt, turn: this.turn, step: ++this.step })
         }
         if (image) { this.replyImages.push(image); break }
-        if (linkedImage && this.replyImages.length < 8) this.replyImages.push(linkedImage)
+        if (linkedImage) this.replyImages.push(linkedImage)
         if (!text) break
         if (this.blocks.at(-1)?.type !== kind) this.blocks.push({ type: kind, text: '' })
         this.blocks.at(-1).text += text
@@ -782,7 +782,7 @@ export class Session {
         if (item.content?.type === 'image') {
           const img = transcriptImage(item.content)
           if (img) images.push(img)
-        } else if (item.content?.type === 'resource_link' && item.content.uri) {
+        } else if (item.content?.type === 'resource_link' && item.content.uri && images.length < 8) {
           const img = localTranscriptImage(item.content.uri, { ...context, name: item.content.name, seen: seenPaths })
           if (img) images.push(img)
         }

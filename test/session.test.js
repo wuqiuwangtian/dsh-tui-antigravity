@@ -881,6 +881,21 @@ test('local image attachments use content-hashed IDs, detected mediaType, versio
   assert.equal(dupLinkTool.images.length, 1)
   assert.equal(dupLinkTool.images[0].name, 'tool-link-0')
 
+  // Distinct resource_link images stop loading after the 8-image cap (never hashing images 9..12).
+  const cappedFiles = []
+  for (let i = 0; i < 12; i++) {
+    const p = join(workspace, `cap-${i}.png`)
+    await writeFile(p, png)
+    cappedFiles.push(p)
+  }
+  for (let i = 0; i < cappedFiles.length; i++) {
+    s.update({ sessionUpdate: 'agent_message_chunk', content: { type: 'resource_link', name: 'cap-' + i, uri: pathToFileURL(cappedFiles[i]).href } })
+  }
+  assert.equal(s.replyImagePaths.size, 8)
+  s.flush()
+  const cappedReply = (await s.history()).filter(e => e.type === 'assistant.message').at(-1)
+  assert.equal(cappedReply.images.length, 8)
+
   // Replacing a parent directory with a symlink pointing outside the workspace
   // is rejected by handle verification even if the symlink target has matching bytes.
   const subDir = join(workspace, 'sub')
