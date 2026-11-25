@@ -10,6 +10,7 @@ import { editSetting } from './settings.js'
 import { manage, managers } from './management.js'
 import { mcpControl } from './mcp.js'
 import { elicit } from './forms.js'
+import { formatDiffText, isNewFileDiff, toToolFileDiff } from './diff.js'
 import { localTranscriptImage, markdownImages, transcriptImage } from './images.js'
 import { Panels } from './panels.js'
 import { readReport, reports } from './reports.js'
@@ -334,7 +335,7 @@ export class Session {
       for (const event of this.events) {
         const view = event.presentation
         if (event.type !== 'tool.result' || event.isError || view?.card !== 'diff') continue
-        for (const diff of view.diffs) changes.push(diff.path + '\n---\n' + (diff.oldText ?? '') + '\n+++\n' + diff.newText)
+        for (const diff of view.diffs) changes.push(formatDiffText(diff))
       }
       return { text: changes.join('\n\n') || '当前会话没有可显示的已完成编辑。' }
     }
@@ -772,7 +773,8 @@ export class Session {
       }
     }
     if (call.status === 'completed' || call.status === 'failed') {
-      const text = toolText(call)
+      const diffs = toolDiffs(call)
+      const text = toolText(call, diffs)
       const isError = call.status === 'failed'
       const context = this.imageContext()
       const images = []
@@ -794,7 +796,7 @@ export class Session {
       }
       this.emit({ type: 'tool.result', seq: ++this.seq, turn: this.turn, step: this.step, callId, time: Date.now(),
         isError, ...(isError ? { errorText: text || 'Tool failed' } : {}),
-        presentation: toolResultPresentation(call, text, this.cwd), text, content: [{ type: 'text', text }], images: images.length ? images : undefined })
+        presentation: toolResultPresentation(call, text, this.cwd, diffs), text, content: [{ type: 'text', text }], images: images.length ? images : undefined })
       if (call.task) this.emit({ type: 'task.end', taskId: callId, status: call.status, time: Date.now() })
       this.tools.set(callId, { status: call.status, task: call.task })
     } else {
@@ -1111,8 +1113,7 @@ function displayPath(path, cwd) {
 }
 
 function toolDiffs(u) {
-  return (u.content ?? []).filter(c => c.type === 'diff').map(c =>
-    ({ path: c.path, oldText: c.oldText ?? null, newText: c.newText }))
+  return (u.content ?? []).filter(c => c.type === 'diff').map(toToolFileDiff)
 }
 
 function toolPath(u) {
@@ -1129,7 +1130,7 @@ function shortToolName(u) {
 function toolCallPresentation(u, cwd) {
   const diffs = toolDiffs(u)
   if (diffs.length) {
-    const allNew = diffs.every(d => d.oldText == null || d.oldText === '')
+    const allNew = diffs.every(isNewFileDiff)
     const name = allNew ? 'write' : 'edit'
     const paths = diffs.map(d => displayPath(d.path, cwd)).filter(Boolean).join(', ')
     const title = (allNew ? 'Write ' : 'Edit ') + (paths || singleLine(u.title))
@@ -1165,10 +1166,9 @@ function toolCallPresentation(u, cwd) {
   return { name, presentation: { card: 'generic', title, category: 'other' } }
 }
 
-function toolResultPresentation(u, text, cwd) {
-  const diffs = toolDiffs(u)
+function toolResultPresentation(u, text, cwd, diffs = toolDiffs(u)) {
   if (diffs.length) {
-    const allNew = diffs.every(d => d.oldText == null || d.oldText === '')
+    const allNew = diffs.every(isNewFileDiff)
     const paths = diffs.map(d => displayPath(d.path, cwd)).filter(Boolean).join(', ')
     const title = (allNew ? 'Write ' : 'Edit ') + (paths || singleLine(u.title))
     return { card: 'diff', diffs, title: title.trim(), displayKey: allNew ? 'tool-name-write' : 'tool-name-edit', category: 'mutate' }
@@ -1193,9 +1193,10 @@ function contentText(content) {
   if (content?.type === 'resource') return [content.resource?.uri, content.resource?.text].filter(Boolean).join('\n')
 }
 
-function toolText(u) {
+function toolText(u, precomputedDiffs) {
+  let diffIndex = 0
   const text = (u.content ?? []).map(c => c.type === 'diff'
-    ? [c.path, '---', c.oldText, '+++', c.newText].join('\n')
+    ? formatDiffText(precomputedDiffs ? precomputedDiffs[diffIndex++] : toToolFileDiff(c))
     : contentText(c.content)).filter(Boolean).join('\n')
   if (text || (u.content ?? []).some(c => c.content?.type === 'image')) return text
   return u.rawOutput == null ? '' : JSON.stringify(u.rawOutput)

@@ -911,3 +911,55 @@ test('local image attachments use content-hashed IDs, detected mediaType, versio
   await symlink(outsideDir, subDir)
   await assert.rejects(subImage.read(), /outside session roots/)
 })
+
+test('edit diffs emit compact unified patches so SplitDiffView does not duplicate unchanged file tops', async t => {
+  const s = await start(t)
+  const before = Array.from({ length: 400 }, (_, i) => `const line_${i + 1} = ${i + 1}`).join('\n') + '\n'
+  const after = before.replace('const line_250 = 250', 'const line_250 = 999')
+
+  s.update({
+    sessionUpdate: 'tool_call',
+    toolCallId: 'edit-1',
+    kind: 'edit',
+    name: 'edit_file',
+    title: 'Edit session.js',
+    status: 'in_progress',
+  })
+  s.update({
+    sessionUpdate: 'tool_call_update',
+    toolCallId: 'edit-1',
+    status: 'completed',
+    content: [{ type: 'diff', path: join(s.cwd, 'session.js'), oldText: before, newText: after }],
+  })
+  s.update({
+    sessionUpdate: 'tool_call',
+    toolCallId: 'write-1',
+    kind: 'edit',
+    name: 'write_file',
+    title: 'Write added.js',
+    status: 'completed',
+    content: [{ type: 'diff', path: join(s.cwd, 'added.js'), oldText: null, newText: 'export const x = 1\n' }],
+  })
+
+  const events = await s.history()
+  const editResult = events.find(e => e.type === 'tool.result' && e.callId === 'edit-1')
+  assert.equal(editResult.presentation.card, 'diff')
+  assert.equal(editResult.presentation.displayKey, 'tool-name-edit')
+  assert.equal(editResult.presentation.title, 'Edit session.js')
+  assert.equal(editResult.presentation.diffs.length, 1)
+  assert.equal(editResult.presentation.diffs[0].change, 'update')
+  assert.equal('oldText' in editResult.presentation.diffs[0], false)
+  assert.match(editResult.presentation.diffs[0].patch, /^@@ -247,7 \+247,7 @@/)
+  assert.ok(editResult.presentation.diffs[0].patch.includes('-const line_250 = 250\n+const line_250 = 999'))
+  assert.ok(!editResult.presentation.diffs[0].patch.includes('line_1 = 1'))
+
+  const writeResult = events.find(e => e.type === 'tool.result' && e.callId === 'write-1')
+  assert.equal(writeResult.presentation.displayKey, 'tool-name-write')
+  assert.equal(writeResult.presentation.title, 'Write added.js')
+  assert.equal(writeResult.presentation.diffs[0].oldText, null)
+  assert.equal(writeResult.presentation.diffs[0].newStart, 1)
+
+  const diffReport = (await s.report('diff')).text
+  assert.match(diffReport, /@@ -247,7 \+247,7 @@/)
+  assert.ok(!diffReport.includes('undefined'))
+})

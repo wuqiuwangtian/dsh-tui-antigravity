@@ -18,6 +18,7 @@
     "panels.js",
     "login.js",
     "desktop.js",
+    "diff.js",
     "forms.js",
     "images.js",
     "mcp.js",
