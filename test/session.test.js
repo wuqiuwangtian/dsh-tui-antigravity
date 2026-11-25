@@ -789,3 +789,48 @@ test('assistant Markdown image embeds and image read_file results attach local T
   const readOutsideResult = events.find(e => e.type === 'tool.result' && e.callId === 'read-outside')
   assert.equal(readOutsideResult.images, undefined)
 })
+
+test('local image attachments use content-hashed IDs, detected mediaType, version-checked reads, and ignore indented code examples', async t => {
+  const workspace = await mkdtemp(join(tmpdir(), 'agy-image-review-'))
+  process.env.ANTIGRAVITY_EXECUTABLE = fileURLToPath(new URL('./agent.mjs', import.meta.url))
+  t.after(async () => { await rm(workspace, { recursive: true, force: true }) })
+
+  // 1x1 PNG (68 bytes) and 1x1 GIF (42 bytes).
+  const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=', 'base64')
+  const gif = Buffer.from('R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7', 'base64')
+  const target = join(workspace, 'preview.png')
+  await writeFile(target, png)
+
+  const s = await backend.open({ kind: 'create', cwd: workspace }, { cwd: workspace })
+  t.after(() => s.dispose())
+
+  // Four-space and tab indented Markdown examples must not attach images.
+  const docsExample = [
+    '展示 Markdown 写法：',
+    '',
+    '    ![example](preview.png)',
+    '\t![tab-example](preview.png)',
+  ].join('\n')
+  s.update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: docsExample } })
+  s.flush()
+
+  // Emit v1 (PNG) then overwrite the same path with v2 (GIF bytes saved as .png).
+  s.update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: '![v1](preview.png)' } })
+  s.flush()
+  await writeFile(target, gif)
+  s.update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: '![v2](preview.png)' } })
+  s.flush()
+
+  const replies = (await s.history()).filter(e => e.type === 'assistant.message')
+  assert.equal(replies[0].images, undefined)
+  const [v1] = replies[1].images
+  const [v2] = replies[2].images
+  assert.notEqual(v1.id, v2.id)
+  assert.equal(v1.mediaType, 'image/png')
+  assert.equal(v1.bytes, png.length)
+  assert.equal(v2.mediaType, 'image/gif')
+  assert.equal(v2.bytes, gif.length)
+  // v1 detects that the underlying file was overwritten; v2 reads the exact current bytes.
+  await assert.rejects(v1.read(), /changed since it was recorded/)
+  assert.deepEqual(Buffer.from(await v2.read()), gif)
+})

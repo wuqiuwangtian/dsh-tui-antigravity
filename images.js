@@ -1,5 +1,5 @@
-import { closeSync, existsSync, openSync, readSync, realpathSync, statSync } from 'node:fs'
-import { readFile, realpath, stat } from 'node:fs/promises'
+import { closeSync, constants, existsSync, fstatSync, openSync, readSync, realpathSync } from 'node:fs'
+import { open, realpath } from 'node:fs/promises'
 import { basename, extname, isAbsolute, join, relative, resolve } from 'node:path'
 import { homedir } from 'node:os'
 import { fileURLToPath } from 'node:url'
@@ -9,14 +9,15 @@ import { imageSize } from 'image-size'
 const MAX_IMAGE_BYTES = 20 * 1024 * 1024
 const MAX_IMAGES_PER_MESSAGE = 8
 const PROBE_BYTES = 256 * 1024
-const MEDIA_TYPES = {
-  '.png': 'image/png',
-  '.jpg': 'image/jpeg',
-  '.jpeg': 'image/jpeg',
-  '.webp': 'image/webp',
-  '.gif': 'image/gif',
+const CHUNK_BYTES = 64 * 1024
+const ALLOWED_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.webp', '.gif'])
+const DETECTED_MEDIA_TYPES = {
+  png: 'image/png',
+  jpg: 'image/jpeg',
+  jpeg: 'image/jpeg',
+  webp: 'image/webp',
+  gif: 'image/gif',
 }
-const VALID_IMAGE_TYPES = new Set(['png', 'jpg', 'jpeg', 'webp', 'gif'])
 
 function isWithin(root, target) {
   const rel = relative(root, target)
@@ -69,36 +70,63 @@ function resolveCandidatePath(raw, cwd) {
   return literal
 }
 
-function probeFileImageSize(path, size) {
+function probeAndHashFileSync(real) {
   let fd
   try {
-    fd = openSync(path, 'r')
-    const head = Buffer.alloc(Math.min(size, PROBE_BYTES))
-    const bytesRead = readSync(fd, head, 0, head.length, 0)
-    const info = imageSize(head.subarray(0, bytesRead))
-    if (info?.width && info?.height && VALID_IMAGE_TYPES.has(String(info.type ?? '').toLowerCase())) {
-      return { width: info.width, height: info.height }
+    fd = openSync(real, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK)
+    const info = fstatSync(fd)
+    if (!info.isFile() || info.size <= 0 || info.size > MAX_IMAGE_BYTES) return undefined
+    const probeTarget = Math.min(info.size, PROBE_BYTES)
+    const probeChunks = []
+    let probeBytes = 0
+    const hash = createHash('sha256')
+    const scratch = Buffer.allocUnsafe(CHUNK_BYTES)
+    let total = 0
+    while (true) {
+      const bytesRead = readSync(fd, scratch, 0, scratch.length, null)
+      if (bytesRead === 0) break
+      total += bytesRead
+      if (total > MAX_IMAGE_BYTES) return undefined
+      const slice = scratch.subarray(0, bytesRead)
+      hash.update(slice)
+      if (probeBytes < probeTarget) {
+        const take = Math.min(bytesRead, probeTarget - probeBytes)
+        probeChunks.push(Buffer.from(slice.subarray(0, take)))
+        probeBytes += take
+      }
+    }
+    if (total === 0) return undefined
+    const header = probeChunks.length === 1 ? probeChunks[0] : Buffer.concat(probeChunks, probeBytes)
+    const probed = imageSize(header)
+    const mediaType = DETECTED_MEDIA_TYPES[String(probed?.type ?? '').toLowerCase()]
+    if (!probed?.width || !probed?.height || !mediaType) return undefined
+    return {
+      width: probed.width,
+      height: probed.height,
+      bytes: total,
+      mediaType,
+      sha256: hash.digest('hex'),
     }
   } catch {
     return undefined
   } finally {
     if (fd !== undefined) closeSync(fd)
   }
-  return undefined
 }
 
 export function transcriptImage(content) {
   if (typeof content?.data !== 'string' || !content.mimeType?.startsWith('image/')) return
   const buffer = Buffer.from(content.data, 'base64')
   try {
-    const { width, height } = imageSize(buffer)
-    if (!width || !height) return
+    const probed = imageSize(buffer)
+    const mediaType = DETECTED_MEDIA_TYPES[String(probed?.type ?? '').toLowerCase()] ?? content.mimeType
+    if (!probed?.width || !probed?.height) return
     return {
       id: createHash('sha256').update(buffer).digest('hex'),
-      width,
-      height,
+      width: probed.width,
+      height: probed.height,
       bytes: buffer.length,
-      mediaType: content.mimeType,
+      mediaType,
       read: async () => Buffer.from(content.data, 'base64'),
     }
   } catch {
@@ -108,59 +136,109 @@ export function transcriptImage(content) {
 
 export function localTranscriptImage(rawPath, context = {}) {
   const candidate = resolveCandidatePath(rawPath, context.cwd)
-  if (!candidate) return undefined
-  const mediaType = MEDIA_TYPES[extname(candidate).toLowerCase()]
-  if (!mediaType) return undefined
+  if (!candidate || !ALLOWED_EXTENSIONS.has(extname(candidate).toLowerCase())) return undefined
   const roots = context.roots ?? allowedImageRoots(context)
   if (!roots.length) return undefined
-  let real, info
+  let real
   try {
     real = realpathSync(candidate)
     if (!roots.some(root => isWithin(root, real))) return undefined
-    info = statSync(real)
   } catch {
     return undefined
   }
-  if (!info.isFile() || info.size <= 0 || info.size > MAX_IMAGE_BYTES) return undefined
-  const dimensions = probeFileImageSize(real, info.size)
-  if (!dimensions) return undefined
+  const verified = probeAndHashFileSync(real)
+  if (!verified) return undefined
   const label = typeof context.name === 'string' && context.name.trim() ? context.name.trim() : basename(real)
   return {
-    id: 'file:' + createHash('sha256').update(real).digest('hex').slice(0, 24),
+    id: 'file:' + verified.sha256.slice(0, 24),
     path: real,
     name: label,
-    mediaType,
-    width: dimensions.width,
-    height: dimensions.height,
-    bytes: info.size,
+    mediaType: verified.mediaType,
+    width: verified.width,
+    height: verified.height,
+    bytes: verified.bytes,
     async read(signal) {
       signal?.throwIfAborted()
       const current = await realpath(real)
       if (!roots.some(root => isWithin(root, current))) throw new Error('Image path moved outside session roots')
-      const currentInfo = await stat(current)
-      if (!currentInfo.isFile() || currentInfo.size > MAX_IMAGE_BYTES) throw new Error('Image is unavailable or too large')
-      const data = await readFile(current, { signal })
-      return new Uint8Array(data.buffer, data.byteOffset, data.byteLength)
+      const fh = await open(current, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK)
+      try {
+        const currentInfo = await fh.stat()
+        if (!currentInfo.isFile() || currentInfo.size <= 0 || currentInfo.size > MAX_IMAGE_BYTES) {
+          throw new Error('Image is unavailable or too large')
+        }
+        const chunks = []
+        const hash = createHash('sha256')
+        const scratch = Buffer.allocUnsafe(CHUNK_BYTES)
+        let total = 0
+        while (true) {
+          signal?.throwIfAborted()
+          const { bytesRead } = await fh.read(scratch, 0, scratch.length, null)
+          if (bytesRead === 0) break
+          total += bytesRead
+          if (total > MAX_IMAGE_BYTES) throw new Error('Image exceeds size limit')
+          const copy = Buffer.from(scratch.subarray(0, bytesRead))
+          hash.update(copy)
+          chunks.push(copy)
+        }
+        if (total !== verified.bytes || hash.digest('hex') !== verified.sha256) {
+          throw new Error('Image file changed since it was recorded')
+        }
+        const data = chunks.length === 1 ? chunks[0] : Buffer.concat(chunks, total)
+        return new Uint8Array(data.buffer, data.byteOffset, data.byteLength)
+      } finally {
+        await fh.close()
+      }
     },
   }
+}
+
+function leadingColumns(line) {
+  let cols = 0
+  for (const ch of line) {
+    if (ch === ' ') cols += 1
+    else if (ch === '\t') cols += 4 - (cols % 4)
+    else break
+  }
+  return cols
 }
 
 function stripMarkdownCode(text) {
   const lines = text.split(/\r?\n/u)
   const kept = []
   let fence
+  let inParagraph = false
+  let listIndent
   for (const line of lines) {
-    if (!fence) {
-      const open = /^ {0,3}(`{3,}|~{3,})/.exec(line)
-      if (open) {
-        fence = open[1]
-        continue
-      }
-      kept.push(line)
-    } else {
+    if (fence) {
       const close = new RegExp('^ {0,3}' + fence[0] + '{' + fence.length + ',}[ \\t]*$')
       if (close.test(line)) fence = undefined
+      continue
     }
+    const open = /^ {0,3}(`{3,}|~{3,})/.exec(line)
+    if (open) {
+      fence = open[1]
+      inParagraph = false
+      continue
+    }
+    if (/^[ \t]*$/.test(line)) {
+      inParagraph = false
+      kept.push(line)
+      continue
+    }
+    const indent = leadingColumns(line)
+    const codeThreshold = listIndent !== undefined ? listIndent + 4 : 4
+    if (!inParagraph && indent >= codeThreshold) continue
+    if (listIndent !== undefined && indent < listIndent) listIndent = undefined
+    const listMarker = /^( {0,3}(?:[-*+]|\d{1,9}[.)])[ \t]+)/.exec(line)
+    if (listMarker) {
+      listIndent = leadingColumns(listMarker[1].replace(/[^ \t]/g, ' '))
+      inParagraph = true
+      kept.push(line)
+      continue
+    }
+    inParagraph = true
+    kept.push(line)
   }
   return kept.join('\n').replace(/(`+)[\s\S]*?\1/g, ' ')
 }
