@@ -1,5 +1,5 @@
-import { closeSync, constants, existsSync, fstatSync, openSync, readSync, realpathSync } from 'node:fs'
-import { open, realpath } from 'node:fs/promises'
+import { closeSync, constants, existsSync, fstatSync, openSync, readlinkSync, readSync, realpathSync, statSync } from 'node:fs'
+import { open, readlink, realpath, stat } from 'node:fs/promises'
 import { basename, extname, isAbsolute, join, relative, resolve } from 'node:path'
 import { homedir } from 'node:os'
 import { fileURLToPath } from 'node:url'
@@ -70,12 +70,52 @@ function resolveCandidatePath(raw, cwd) {
   return literal
 }
 
-function probeAndHashFileSync(real) {
+function resolveAllowedRealPath(rawPath, { cwd, roots }) {
+  const candidate = resolveCandidatePath(rawPath, cwd)
+  if (!candidate || !ALLOWED_EXTENSIONS.has(extname(candidate).toLowerCase())) return undefined
+  if (!roots.length) return undefined
+  try {
+    const real = realpathSync(candidate)
+    return roots.some(root => isWithin(root, real)) ? real : undefined
+  } catch {
+    return undefined
+  }
+}
+
+function verifyOpenedFdSync(fd, expectedReal, roots) {
+  const fdStat = fstatSync(fd)
+  if (!fdStat.isFile() || fdStat.size <= 0 || fdStat.size > MAX_IMAGE_BYTES) return undefined
+  if (process.platform === 'linux') {
+    const fdPath = readlinkSync('/proc/self/fd/' + fd)
+    if (fdPath.endsWith(' (deleted)') || !roots.some(root => isWithin(root, fdPath))) return undefined
+  }
+  const currentReal = realpathSync(expectedReal)
+  if (!roots.some(root => isWithin(root, currentReal))) return undefined
+  const currentStat = statSync(currentReal)
+  if (currentStat.dev !== fdStat.dev || currentStat.ino !== fdStat.ino) return undefined
+  return fdStat
+}
+
+async function verifyOpenedHandle(fh, expectedReal, roots) {
+  const fdStat = await fh.stat()
+  if (!fdStat.isFile() || fdStat.size <= 0 || fdStat.size > MAX_IMAGE_BYTES) return undefined
+  if (process.platform === 'linux') {
+    const fdPath = await readlink('/proc/self/fd/' + fh.fd)
+    if (fdPath.endsWith(' (deleted)') || !roots.some(root => isWithin(root, fdPath))) return undefined
+  }
+  const currentReal = await realpath(expectedReal)
+  if (!roots.some(root => isWithin(root, currentReal))) return undefined
+  const currentStat = await stat(currentReal)
+  if (currentStat.dev !== fdStat.dev || currentStat.ino !== fdStat.ino) return undefined
+  return fdStat
+}
+
+function probeAndHashFileSync(real, roots) {
   let fd
   try {
     fd = openSync(real, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK)
-    const info = fstatSync(fd)
-    if (!info.isFile() || info.size <= 0 || info.size > MAX_IMAGE_BYTES) return undefined
+    const info = verifyOpenedFdSync(fd, real, roots)
+    if (!info) return undefined
     const probeTarget = Math.min(info.size, PROBE_BYTES)
     const probeChunks = []
     let probeBytes = 0
@@ -134,21 +174,10 @@ export function transcriptImage(content) {
   }
 }
 
-export function localTranscriptImage(rawPath, context = {}) {
-  const candidate = resolveCandidatePath(rawPath, context.cwd)
-  if (!candidate || !ALLOWED_EXTENSIONS.has(extname(candidate).toLowerCase())) return undefined
-  const roots = context.roots ?? allowedImageRoots(context)
-  if (!roots.length) return undefined
-  let real
-  try {
-    real = realpathSync(candidate)
-    if (!roots.some(root => isWithin(root, real))) return undefined
-  } catch {
-    return undefined
-  }
-  const verified = probeAndHashFileSync(real)
+function buildLocalFacade(real, roots, name) {
+  const verified = probeAndHashFileSync(real, roots)
   if (!verified) return undefined
-  const label = typeof context.name === 'string' && context.name.trim() ? context.name.trim() : basename(real)
+  const label = typeof name === 'string' && name.trim() ? name.trim() : basename(real)
   return {
     id: 'file:' + verified.sha256.slice(0, 24),
     path: real,
@@ -159,14 +188,10 @@ export function localTranscriptImage(rawPath, context = {}) {
     bytes: verified.bytes,
     async read(signal) {
       signal?.throwIfAborted()
-      const current = await realpath(real)
-      if (!roots.some(root => isWithin(root, current))) throw new Error('Image path moved outside session roots')
-      const fh = await open(current, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK)
+      const fh = await open(real, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK)
       try {
-        const currentInfo = await fh.stat()
-        if (!currentInfo.isFile() || currentInfo.size <= 0 || currentInfo.size > MAX_IMAGE_BYTES) {
-          throw new Error('Image is unavailable or too large')
-        }
+        const currentInfo = await verifyOpenedHandle(fh, real, roots)
+        if (!currentInfo) throw new Error('Image path moved outside session roots or is unavailable')
         const chunks = []
         const hash = createHash('sha256')
         const scratch = Buffer.allocUnsafe(CHUNK_BYTES)
@@ -193,6 +218,13 @@ export function localTranscriptImage(rawPath, context = {}) {
   }
 }
 
+export function localTranscriptImage(rawPath, context = {}) {
+  const roots = context.roots ?? allowedImageRoots(context)
+  const real = resolveAllowedRealPath(rawPath, { cwd: context.cwd, roots })
+  if (!real) return undefined
+  return buildLocalFacade(real, roots, context.name)
+}
+
 function leadingColumns(line) {
   let cols = 0
   for (const ch of line) {
@@ -203,13 +235,33 @@ function leadingColumns(line) {
   return cols
 }
 
+function peelBlockquotes(line) {
+  let depth = 0
+  let rest = line
+  while (true) {
+    const match = /^ {0,3}>[ \t]?/.exec(rest)
+    if (!match) break
+    depth += 1
+    rest = rest.slice(match[0].length)
+  }
+  return { depth, text: rest }
+}
+
 function stripMarkdownCode(text) {
   const lines = text.split(/\r?\n/u)
   const kept = []
+  let quoteDepth = 0
   let fence
   let inParagraph = false
   let listIndent
-  for (const line of lines) {
+  for (const rawLine of lines) {
+    const { depth, text: line } = peelBlockquotes(rawLine)
+    if (depth !== quoteDepth) {
+      quoteDepth = depth
+      fence = undefined
+      inParagraph = false
+      listIndent = undefined
+    }
     if (fence) {
       const close = new RegExp('^ {0,3}' + fence[0] + '{' + fence.length + ',}[ \\t]*$')
       if (close.test(line)) fence = undefined
@@ -230,6 +282,13 @@ function stripMarkdownCode(text) {
     const codeThreshold = listIndent !== undefined ? listIndent + 4 : 4
     if (!inParagraph && indent >= codeThreshold) continue
     if (listIndent !== undefined && indent < listIndent) listIndent = undefined
+    // ATX headings and thematic breaks terminate any preceding paragraph and
+    // cannot be continued by an indented line on the following row.
+    if (/^ {0,3}#{1,6}(?:[ \t]|$)/.test(line) || /^ {0,3}(?:(?:-[ \t]*){3,}|(?:\*[ \t]*){3,}|(?:_[ \t]*){3,})$/.test(line)) {
+      inParagraph = false
+      kept.push(line)
+      continue
+    }
     const listMarker = /^( {0,3}(?:[-*+]|\d{1,9}[.)])[ \t]+)/.exec(line)
     if (listMarker) {
       listIndent = leadingColumns(listMarker[1].replace(/[^ \t]/g, ' '))
@@ -245,19 +304,21 @@ function stripMarkdownCode(text) {
 
 const MARKDOWN_IMAGE = /!\[([^\]\r\n]*)\]\(\s*(?:<([^>\r\n]+)>|((?:[^\s()\r\n]|\([^\s()\r\n]*\))+))(?:\s+(?:"[^"\r\n]*"|'[^'\r\n]*'))?\s*\)/g
 
-export function markdownImages(text, context = {}, limit = MAX_IMAGES_PER_MESSAGE) {
+export function markdownImages(text, context = {}, limit = MAX_IMAGES_PER_MESSAGE, existingPaths) {
   if (typeof text !== 'string' || !text.includes('![')) return []
   const roots = allowedImageRoots(context)
   if (!roots.length) return []
   const cleaned = stripMarkdownCode(text)
-  const seen = new Set()
+  const seen = new Set(existingPaths)
   const images = []
   for (const match of cleaned.matchAll(MARKDOWN_IMAGE)) {
     const alt = match[1]
     const href = match[2] ?? match[3]
-    const image = localTranscriptImage(href, { ...context, roots, name: alt })
-    if (!image || seen.has(image.path)) continue
-    seen.add(image.path)
+    const real = resolveAllowedRealPath(href, { cwd: context.cwd, roots })
+    if (!real || seen.has(real)) continue
+    seen.add(real)
+    const image = buildLocalFacade(real, roots, alt)
+    if (!image) continue
     images.push(image)
     if (images.length >= limit) break
   }

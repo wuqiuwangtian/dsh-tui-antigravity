@@ -804,18 +804,26 @@ test('local image attachments use content-hashed IDs, detected mediaType, versio
   const s = await backend.open({ kind: 'create', cwd: workspace }, { cwd: workspace })
   t.after(() => s.dispose())
 
-  // Four-space and tab indented Markdown examples must not attach images.
+  // Four-space and tab indented Markdown examples (including right after a heading)
+  // and tilde fences inside blockquotes must not attach images.
   const docsExample = [
-    '展示 Markdown 写法：',
+    '# Markdown 写法示例',
+    '    ![after-heading](preview.png)',
     '',
     '    ![example](preview.png)',
     '\t![tab-example](preview.png)',
+    '',
+    '> ~~~md',
+    '> ![quoted-fence](preview.png)',
+    '> ~~~',
   ].join('\n')
   s.update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: docsExample } })
   s.flush()
 
-  // Emit v1 (PNG) then overwrite the same path with v2 (GIF bytes saved as .png).
-  s.update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: '![v1](preview.png)' } })
+  // Repeated references to the same image in one message deduplicate before hashing
+  // (also verify real image inside a blockquote outside a fence still renders).
+  const repeated = Array.from({ length: 20 }, (_, i) => `![dup-${i}](preview.png)`).join('\n') + '\n> ![quoted-real](preview.png)'
+  s.update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: repeated } })
   s.flush()
   await writeFile(target, gif)
   s.update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: '![v2](preview.png)' } })
@@ -823,6 +831,7 @@ test('local image attachments use content-hashed IDs, detected mediaType, versio
 
   const replies = (await s.history()).filter(e => e.type === 'assistant.message')
   assert.equal(replies[0].images, undefined)
+  assert.equal(replies[1].images.length, 1)
   const [v1] = replies[1].images
   const [v2] = replies[2].images
   assert.notEqual(v1.id, v2.id)
@@ -833,4 +842,19 @@ test('local image attachments use content-hashed IDs, detected mediaType, versio
   // v1 detects that the underlying file was overwritten; v2 reads the exact current bytes.
   await assert.rejects(v1.read(), /changed since it was recorded/)
   assert.deepEqual(Buffer.from(await v2.read()), gif)
+
+  // Replacing a parent directory with a symlink pointing outside the workspace
+  // is rejected by handle verification even if the symlink target has matching bytes.
+  const subDir = join(workspace, 'sub')
+  const outsideDir = await mkdtemp(join(tmpdir(), 'agy-outside-dir-'))
+  t.after(async () => { await rm(outsideDir, { recursive: true, force: true }) })
+  await mkdir(subDir, { recursive: true })
+  await writeFile(join(subDir, 'pic.png'), png)
+  await writeFile(join(outsideDir, 'pic.png'), png)
+  s.update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: '![sub](sub/pic.png)' } })
+  s.flush()
+  const subImage = (await s.history()).filter(e => e.type === 'assistant.message').at(-1).images[0]
+  await rm(subDir, { recursive: true, force: true })
+  await symlink(outsideDir, subDir)
+  await assert.rejects(subImage.read(), /outside session roots/)
 })

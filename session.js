@@ -647,12 +647,7 @@ export class Session {
     const seen = new Set(images.map(img => img.path).filter(Boolean))
     const remaining = Math.max(0, 8 - images.length)
     if (remaining > 0) {
-      for (const img of markdownImages(text, this.imageContext(), remaining + seen.size)) {
-        if (seen.has(img.path)) continue
-        seen.add(img.path)
-        images.push(img)
-        if (images.length >= 8) break
-      }
+      images.push(...markdownImages(text, this.imageContext(), remaining, seen))
     }
     this.emit({ type: 'assistant.message', seq, anchor: String(seq), turn: this.turn, step: this.step,
       attemptId: this.attempt, time: Date.now(), blocks: this.blocks, images: images.length ? images : undefined, canonical: true })
