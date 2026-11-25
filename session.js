@@ -2,8 +2,7 @@ import { existsSync } from 'node:fs'
 import { realpath, stat } from 'node:fs/promises'
 import { isAbsolute, join, relative, resolve } from 'node:path'
 import { homedir } from 'node:os'
-import { imageSize } from 'image-size'
-import { createHash, randomUUID } from 'node:crypto'
+import { randomUUID } from 'node:crypto'
 import { viewTeam } from './team.js'
 import { viewArtifacts } from './artifacts.js'
 import { codeSearch } from './search.js'
@@ -11,6 +10,7 @@ import { editSetting } from './settings.js'
 import { manage, managers } from './management.js'
 import { mcpControl } from './mcp.js'
 import { elicit } from './forms.js'
+import { localTranscriptImage, markdownImages, transcriptImage } from './images.js'
 import { Panels } from './panels.js'
 import { readReport, reports } from './reports.js'
 import { googleLogin } from './login.js'
@@ -636,11 +636,26 @@ export class Session {
     if (ids.length) this.pending({ [key]: ids })
   }
 
+  imageContext() {
+    return { cwd: this.cwd, directories: this.directories, sessionId: this.id }
+  }
   flush() {
     if (!this.blocks.length && !this.replyImages.length) return
     const seq = ++this.seq
+    const text = this.blocks.filter(b => b.type === 'text').map(b => b.text).join('')
+    const images = [...this.replyImages]
+    const seen = new Set(images.map(img => img.path).filter(Boolean))
+    const remaining = Math.max(0, 8 - images.length)
+    if (remaining > 0) {
+      for (const img of markdownImages(text, this.imageContext(), remaining + seen.size)) {
+        if (seen.has(img.path)) continue
+        seen.add(img.path)
+        images.push(img)
+        if (images.length >= 8) break
+      }
+    }
     this.emit({ type: 'assistant.message', seq, anchor: String(seq), turn: this.turn, step: this.step,
-      attemptId: this.attempt, time: Date.now(), blocks: this.blocks, images: this.replyImages.length ? this.replyImages : undefined, canonical: true })
+      attemptId: this.attempt, time: Date.now(), blocks: this.blocks, images: images.length ? images : undefined, canonical: true })
     this.emit({ type: 'assistant.attempt.end', attemptId: this.attempt, outcome: 'committed', turn: this.turn, step: this.step })
     this.blocks = []
     this.replyImages = []
@@ -681,14 +696,20 @@ export class Session {
       case 'agent_message_chunk':
       case 'agent_thought_chunk': {
         const image = u.content?.type === 'image' ? transcriptImage(u.content) : undefined
+        const linkedImage = u.sessionUpdate === 'agent_message_chunk' && u.content?.type === 'resource_link' && u.content.uri
+          ? localTranscriptImage(u.content.uri, { ...this.imageContext(), name: u.content.name }) : undefined
         const text = contentText(u.content)
-        if (!image && !text) return
+        if (!image && !linkedImage && !text) return
         const kind = u.sessionUpdate === 'agent_message_chunk' ? 'text' : 'reasoning'
         if (!this.blocks.length && !this.replyImages.length) {
           this.attempt = randomUUID()
           this.emit({ type: 'assistant.attempt.start', attemptId: this.attempt, turn: this.turn, step: ++this.step })
         }
         if (image) { this.replyImages.push(image); break }
+        if (linkedImage && !this.replyImages.some(existing => existing.path === linkedImage.path)) {
+          this.replyImages.push(linkedImage)
+        }
+        if (!text) break
         if (this.blocks.at(-1)?.type !== kind) this.blocks.push({ type: kind, text: '' })
         this.blocks.at(-1).text += text
         this.emit({ type: 'assistant.delta', attemptId: this.attempt, index: this.blocks.length - 1, time: Date.now(),
@@ -759,8 +780,24 @@ export class Session {
     if (call.status === 'completed' || call.status === 'failed') {
       const text = toolText(call)
       const isError = call.status === 'failed'
-      const images = (call.content ?? []).filter(c => c.type === 'content' && c.content?.type === 'image')
-        .map(c => transcriptImage(c.content)).filter(Boolean)
+      const context = this.imageContext()
+      const images = []
+      const seenPaths = new Set()
+      for (const item of call.content ?? []) {
+        if (item.type !== 'content') continue
+        if (item.content?.type === 'image') {
+          const img = transcriptImage(item.content)
+          if (img) images.push(img)
+        } else if (item.content?.type === 'resource_link' && item.content.uri) {
+          const img = localTranscriptImage(item.content.uri, { ...context, name: item.content.name })
+          if (img && !seenPaths.has(img.path)) { seenPaths.add(img.path); images.push(img) }
+        }
+      }
+      if (!isError && !images.length && (call.kind === 'read' || /^(?:read_file|view_file)$/i.test(call.name ?? ''))) {
+        const rawPath = toolPath(call)
+        const img = rawPath ? localTranscriptImage(rawPath, context) : undefined
+        if (img) images.push(img)
+      }
       this.emit({ type: 'tool.result', seq: ++this.seq, turn: this.turn, step: this.step, callId, time: Date.now(),
         isError, ...(isError ? { errorText: text || 'Tool failed' } : {}),
         presentation: toolResultPresentation(call, text, this.cwd), text, content: [{ type: 'text', text }], images: images.length ? images : undefined })
@@ -1049,17 +1086,6 @@ export class Session {
     await this.rpc?.close()
     this.listeners.clear()
   }
-}
-
-function transcriptImage(content) {
-  if (typeof content.data !== 'string' || !content.mimeType?.startsWith('image/')) return
-  const buffer = Buffer.from(content.data, 'base64')
-  try {
-    const { width, height } = imageSize(buffer)
-    if (!width || !height) return
-    return { id: createHash('sha256').update(buffer).digest('hex'), width, height, bytes: buffer.length,
-      mediaType: content.mimeType, read: async () => Buffer.from(content.data, 'base64') }
-  } catch { return undefined }
 }
 
 function firstString(...values) {

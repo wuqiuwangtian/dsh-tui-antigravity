@@ -19,6 +19,7 @@
     "login.js",
     "desktop.js",
     "forms.js",
+    "images.js",
     "mcp.js",
     "management.js",
     "prefs.js",

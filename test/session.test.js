@@ -1,9 +1,9 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtemp, mkdir, readFile, writeFile, rm } from 'node:fs/promises'
+import { mkdtemp, mkdir, readFile, symlink, writeFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { backend } from '../backend.js'
 
 function observe(session, type, match = () => true) {
@@ -702,4 +702,90 @@ test('full-access mode restarts agy with --dangerously-skip-permissions, persist
     assert.ok(exitCalls.some(c => c.method === 'session/load' && c.skipPermissions === false))
     assert.ok(exitCalls.some(c => c.method === 'session/set_config_option' && c.configId === 'mode' && c.value === 'auto'))
   } finally { await restarted.dispose() }
+})
+
+test('assistant Markdown image embeds and image read_file results attach local TranscriptImage facades within session roots only', async t => {
+  const previousHome = process.env.HOME
+  const sandbox = await mkdtemp(join(tmpdir(), 'agy-images-'))
+  const fakeHome = join(sandbox, 'home')
+  const workspace = join(sandbox, 'workspace')
+  const outside = join(sandbox, 'outside')
+  const brainDir = join(fakeHome, '.gemini', 'antigravity-cli', 'brain', 'fixture-session', 'scratch')
+  const otherBrainDir = join(fakeHome, '.gemini', 'antigravity-cli', 'brain', 'other-session')
+  await Promise.all([
+    mkdir(workspace, { recursive: true }),
+    mkdir(outside, { recursive: true }),
+    mkdir(brainDir, { recursive: true }),
+    mkdir(otherBrainDir, { recursive: true }),
+  ])
+  process.env.HOME = fakeHome
+  process.env.ANTIGRAVITY_EXECUTABLE = fileURLToPath(new URL('./agent.mjs', import.meta.url))
+  t.after(async () => {
+    process.env.HOME = previousHome
+    await rm(sandbox, { recursive: true, force: true })
+  })
+
+  const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=', 'base64')
+  const brainPng = join(brainDir, 'style_A.png')
+  const workspacePng = join(workspace, '示例图.png')
+  const outsidePng = join(outside, 'secret.png')
+  const otherBrainPng = join(otherBrainDir, 'foreign.png')
+  const fakePng = join(workspace, 'not-an-image.png')
+  const escapedLink = join(workspace, 'escape.png')
+  await Promise.all([
+    writeFile(brainPng, png),
+    writeFile(workspacePng, png),
+    writeFile(outsidePng, png),
+    writeFile(otherBrainPng, png),
+    writeFile(fakePng, 'plain text pretending to be png'),
+  ])
+  await symlink(outsidePng, escapedLink)
+
+  const s = await backend.open({ kind: 'create', cwd: workspace }, { cwd: workspace })
+  t.after(() => s.dispose())
+
+  const reply = [
+    '直接看下面风格：',
+    `![风格 A：Windows Terminal](${pathToFileURL(brainPng).href})`,
+    `![重复引用](${pathToFileURL(brainPng).href})`,
+    '![工作区中文图](示例图.png)',
+    `![外部文件](${pathToFileURL(outsidePng).href})`,
+    `![其他会话](${pathToFileURL(otherBrainPng).href})`,
+    '![符号链接越界](escape.png)',
+    '![伪造图片](not-an-image.png)',
+    '![远程图片](https://example.com/a.png)',
+    '`![行内代码](示例图.png)`',
+    '```md',
+    `![代码块内](${pathToFileURL(brainPng).href})`,
+    '```',
+    `[普通链接不是内嵌图](${pathToFileURL(workspacePng).href})`,
+  ].join('\n')
+  s.update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: reply } })
+  s.flush()
+
+  // read_file on a local image attaches a tool.result image; out-of-scope read_file does not.
+  s.update({ sessionUpdate: 'tool_call', toolCallId: 'read-img', kind: 'read', name: 'read_file', title: 'File ' + brainPng, rawInput: { Path: brainPng }, status: 'in_progress' })
+  s.update({ sessionUpdate: 'tool_call_update', toolCallId: 'read-img', status: 'completed', content: [{ type: 'content', content: { type: 'text', text: 'Showing binary file of type image/png' } }] })
+
+  s.update({ sessionUpdate: 'tool_call', toolCallId: 'read-outside', kind: 'read', name: 'read_file', title: 'File ' + outsidePng, rawInput: { Path: outsidePng }, status: 'in_progress' })
+  s.update({ sessionUpdate: 'tool_call_update', toolCallId: 'read-outside', status: 'completed', content: [{ type: 'content', content: { type: 'text', text: 'Showing binary file of type image/png' } }] })
+
+  const events = await s.history()
+  const assistant = events.find(e => e.type === 'assistant.message')
+  assert.equal(assistant.images.length, 2)
+  assert.equal(assistant.images[0].name, '风格 A：Windows Terminal')
+  assert.equal(assistant.images[0].mediaType, 'image/png')
+  assert.equal(assistant.images[0].width, 1)
+  assert.equal(assistant.images[0].height, 1)
+  assert.deepEqual(Buffer.from(await assistant.images[0].read()), png)
+  assert.equal(assistant.images[1].name, '工作区中文图')
+  assert.equal(assistant.images[1].path, workspacePng)
+
+  const readImgResult = events.find(e => e.type === 'tool.result' && e.callId === 'read-img')
+  assert.equal(readImgResult.images.length, 1)
+  assert.equal(readImgResult.images[0].path, brainPng)
+  assert.deepEqual(Buffer.from(await readImgResult.images[0].read()), png)
+
+  const readOutsideResult = events.find(e => e.type === 'tool.result' && e.callId === 'read-outside')
+  assert.equal(readOutsideResult.images, undefined)
 })
