@@ -693,9 +693,12 @@ export class Session {
       case 'agent_message_chunk':
       case 'agent_thought_chunk': {
         const image = u.content?.type === 'image' ? transcriptImage(u.content) : undefined
-        const linkedImage = u.sessionUpdate === 'agent_message_chunk' && u.content?.type === 'resource_link' && u.content.uri && this.replyImages.length < 8
-          ? localTranscriptImage(u.content.uri, { ...this.imageContext(), name: u.content.name, seen: this.replyImagePaths }) : undefined
+        const hasResourceLink = u.sessionUpdate === 'agent_message_chunk' && u.content?.type === 'resource_link' && u.content.uri
         const text = contentText(u.content)
+        if (!image && !hasResourceLink && !text) return
+        this.claimHandedOffSteers()
+        const linkedImage = hasResourceLink && this.replyImages.length < 8
+          ? localTranscriptImage(u.content.uri, { ...this.imageContext(), name: u.content.name, seen: this.replyImagePaths }) : undefined
         if (!image && !linkedImage && !text) return
         const kind = u.sessionUpdate === 'agent_message_chunk' ? 'text' : 'reasoning'
         if (!this.blocks.length && !this.replyImages.length) {
@@ -751,6 +754,7 @@ export class Session {
     const callId = update.toolCallId
     const previous = this.tools.get(callId)
     if (previous?.status === 'completed' || previous?.status === 'failed') return
+    if (!previous) this.claimHandedOffSteers()
     // A final ACP update may contain only status. Retain the preceding
     // presentation and content until we can commit the complete result.
     const call = previous ?? { status: 'pending' }
@@ -911,11 +915,13 @@ export class Session {
     }
     if (this.status === 'running' && placement === 'steer' && this.acceptSteers && !this.cancelling) {
       const id = input.clientMessageId
-      this.steered.set(id, { input })
+      const blocks = input.blocks ?? [{ type: 'text', text: input.text }]
+      const steers = this.steers
+      this.steered.set(id, { input, blocks, rpcSent: false, handedOff: false })
       this.pending({})
-      const steered = this.steer(input)
-      this.steers.add(steered)
-      void steered.finally(() => this.steers.delete(steered))
+      let steered
+      steered = this.steer(input, blocks, steers).finally(() => steers.delete(steered))
+      steers.add(steered)
       return { accepted: true }
     }
     if (this.active && this.status !== 'idle' && this.status !== 'disposed') {
@@ -936,12 +942,34 @@ export class Session {
     this.active = this.run(input)
     return { accepted: true }
   }
-  async steer(input) {
+  markSteersHandedOff() {
+    for (const entry of this.steered.values()) {
+      if (entry.rpcSent) entry.handedOff = true
+    }
+  }
+  claimSteers(entries, flushBefore = true) {
+    if (!entries.length) return
+    if (flushBefore) this.flush()
+    for (const entry of entries) this.steered.delete(entry.input.clientMessageId)
+    this.pending({ claimed: entries.map(e => e.input.clientMessageId) })
+    for (const { input, blocks } of entries) {
+      const id = input.clientMessageId
+      this.emit({ type: 'user.message', seq: ++this.seq, anchor: id, id,
+        time: Date.now(), turn: this.turn, source: 'user', text: input.text, blocks, images: input.images })
+    }
+  }
+  claimHandedOffSteers() {
+    if (!this.steered.size) return
+    const ready = [...this.steered.values()].filter(entry => entry.handedOff)
+    if (ready.length) this.claimSteers(ready, true)
+  }
+  async steer(input, blocks = input.blocks ?? [{ type: 'text', text: input.text }], steers = this.steers) {
     const id = input.clientMessageId
-    const blocks = input.blocks ?? [{ type: 'text', text: input.text }]
     try {
       const prompt = await this.promptBlocks(blocks, input.images)
-      if (!this.steered.has(id)) return
+      if (this.steers !== steers) return
+      const entry = this.steered.get(id)
+      if (!entry) return
       if (this.cancelling || this.disposing) {
         this.steered.delete(id)
         if (!this.disposing) {
@@ -952,19 +980,30 @@ export class Session {
         }
         return
       }
+      entry.rpcSent = true
+      if (this.primarySettled) entry.handedOff = true
       const result = await this.rpc.request('session/prompt', { sessionId: this.id, prompt })
-      if (!this.steered.delete(id)) return
+      if (this.steers !== steers) return
+      this.turnOutcome = { result }
       if (result?.stopReason === 'cancelled') {
-        if (this.cancelCause === 'user') {
-          this.queue.push({ input })
-          this.pending({})
-        } else this.pending({ discarded: [id] })
+        if (!this.cancelling && this.steered.delete(id)) this.pending({ discarded: [id] })
         return
       }
-      this.pending({ claimed: [id] })
-      this.emit({ type: 'user.message', seq: ++this.seq, anchor: id, id,
-        time: Date.now(), turn: this.turn, source: 'user', text: input.text, blocks, images: input.images })
-    } catch {
+      // When another steer is already in flight, agy acp has handed turn
+      // ownership forward to it; keep earlier steers marked handedOff so they
+      // claim together in order right before the model's next step.
+      if (steers.size > 1) {
+        this.markSteersHandedOff()
+        return
+      }
+      const toClaim = [...this.steered.values()].filter(e => e.handedOff || e.input.clientMessageId === id)
+      if (toClaim.length) this.claimSteers(toClaim, false)
+    } catch (e) {
+      if (this.steers !== steers) return
+      if (e?.code === -32000 || /unauthenticated|authentication required/i.test(e?.message ?? '')) {
+        this.turnOutcome = { error: e }
+        return
+      }
       if (!this.steered.delete(id)) return
       if (this.disposing) return
       if (this.cancelling) {
@@ -1015,12 +1054,44 @@ export class Session {
     const blocks = input.blocks ?? [{ type: 'text', text: input.text }]
     this.pending({ claimed: [input.clientMessageId] })
     this.user(input.text, input.clientMessageId, blocks, input.images)
+    const steers = new Set()
+    this.steers = steers
+    this.primarySettled = false
+    this.turnOutcome = undefined
+    let notifyCancel
+    const cancelSignal = new Promise(resolve => { notifyCancel = resolve })
+    this.notifyCancel = notifyCancel
     try {
       const prompt = await this.promptBlocks(blocks, input.images)
       if (this.cancelling) reason = { kind: 'interrupted' }
       else {
         this.acceptSteers = true
-        const result = await this.rpc.request('session/prompt', { sessionId: this.id, prompt })
+        let result = await this.rpc.request('session/prompt', { sessionId: this.id, prompt })
+        this.primarySettled = true
+        // agy acp accepts a concurrent session/prompt (steer) by resolving the
+        // previous prompt immediately and keeping the newest steer RPC open
+        // until the turn completes. Keep the turn active until all handed-off
+        // steers settle (or cancellation completes).
+        if (result.stopReason !== 'cancelled') {
+          while (steers.size > 0 && !this.disposing) {
+            this.markSteersHandedOff()
+            const batch = Promise.allSettled([...steers])
+            if (this.cancelling) {
+              let timer
+              try {
+                const settled = await Promise.race([
+                  batch.then(() => true),
+                  new Promise(resolve => { timer = setTimeout(() => resolve(false), 1500) }),
+                ])
+                if (!settled) break
+              } finally { clearTimeout(timer) }
+            } else {
+              await Promise.race([batch, cancelSignal])
+            }
+          }
+        }
+        if (this.turnOutcome?.error) throw this.turnOutcome.error
+        result = this.turnOutcome?.result ?? result
         reason = result.stopReason === 'cancelled' ? { kind: 'interrupted' } : result.stopReason === 'end_turn' ? { kind: 'completed' } : { kind: 'other', label: result.stopReason }
         if (result.usage) usage = { input: result.usage.inputTokens, output: result.usage.outputTokens, cacheRead: result.usage.cachedReadTokens }
       }
@@ -1034,6 +1105,10 @@ export class Session {
     finally {
       this.acceptSteers = false
       await this.settleSteers()
+      this.steers = new Set()
+      this.primarySettled = false
+      this.turnOutcome = undefined
+      this.notifyCancel = undefined
       this.flush()
       this.dismiss()
       this.emit({ type: 'turn.end', turn: this.turn, time: Date.now(), reason, usage })
@@ -1063,6 +1138,7 @@ export class Session {
     const active = this.active
     this.cancelling = true
     this.cancelCause = cause
+    this.notifyCancel?.()
     this.dismiss()
     try { await this.rpc?.notify('session/cancel', { sessionId: this.id }) } catch {}
     let timer
@@ -1073,6 +1149,7 @@ export class Session {
   }
   async dispose() {
     this.disposing = true
+    this.notifyCancel?.()
     this.clearReports()
     this.localAction?.abort()
     this.panels.close()

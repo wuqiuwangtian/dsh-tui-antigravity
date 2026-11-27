@@ -82,9 +82,31 @@ for await (const line of createInterface({ input: process.stdin })) {
         send({ id, result: { stopReason: 'end_turn' } })
         break
       }
+      if (text.startsWith('steer-handoff') && prompting !== undefined) {
+        // Real agy acp protocol: resolve the previous in-flight session/prompt
+        // immediately and transfer turn-completion ownership to the new steer.
+        const prevId = prompting
+        prompting = id
+        send({ id: prevId, result: { stopReason: 'end_turn' } })
+        if (text === 'steer-handoff-finish') {
+          const activeId = id
+          setTimeout(() => {
+            if (prompting !== activeId) return
+            update({ sessionUpdate: 'tool_call_update', toolCallId: 'step-1', status: 'completed', content: [{ type: 'content', content: { type: 'text', text: 'STEP1_OK' } }] })
+            update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'HANDOFF_REPLY' } })
+            prompting = undefined
+            send({ id: activeId, result: { stopReason: 'end_turn', usage: { inputTokens: 100, outputTokens: 12, cachedReadTokens: 50 } } })
+          }, 120)
+        }
+        break
+      }
       prompting = id
       if (text === 'exit') process.exit(1)
       if (text === 'wait') break
+      if (text === 'step-tool') {
+        update({ sessionUpdate: 'tool_call', toolCallId: 'step-1', kind: 'execute', name: 'run_command', title: 'sleep 3', status: 'in_progress' })
+        break
+      }
       if (text === 'edit') {
         send({ id: 'permission', method: 'session/request_permission', params: { sessionId,
           toolCall: { toolCallId: 'edit', title: 'Edit file' },

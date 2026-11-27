@@ -963,3 +963,52 @@ test('edit diffs emit compact unified patches so SplitDiffView does not duplicat
   assert.match(diffReport, /@@ -247,7 \+247,7 @@/)
   assert.ok(!diffReport.includes('undefined'))
 })
+
+test('real agy steer handoff keeps the turn active across multiple steers, drains followup after completion, and handles cancel', async t => {
+  const s = await start(t)
+  const pendingEvents = []
+  s.subscribe(events => {
+    for (const e of events) if (e.type === 'pending.changed') pendingEvents.push(e)
+  })
+
+  // 1. Start a tool-running turn, send two steers (handoff chain) plus one followup.
+  const toolStarted = observe(s, 'tool.call', e => e.callId === 'step-1')
+  await s.submit({ text: 'step-tool', clientMessageId: 't1' })
+  await toolStarted
+  await s.submit({ text: 'steer-handoff-1', clientMessageId: 'st-1' }, 'steer')
+  await new Promise(r => setTimeout(r, 30))
+  // Turn must STILL be running after prompt1 handed off to st-1.
+  assert.equal(s.status, 'running')
+  await s.submit({ text: 'steer-handoff-finish', clientMessageId: 'st-2' }, 'steer')
+  await s.submit({ text: 'followup-after-steer', clientMessageId: 'fu-1' }, 'followup')
+
+  const turn1End = observe(s, 'turn.end', e => e.turn === 1)
+  const turn2End = observe(s, 'turn.end', e => e.turn === 2)
+  const end1 = await turn1End
+  assert.equal(end1.reason.kind, 'completed')
+  assert.equal(end1.usage?.output, 12)
+  await turn2End
+  assert.equal(s.status, 'idle')
+
+  // Neither steer was dropped; both were claimed in order AFTER tool.result and BEFORE assistant reply.
+  assert.ok(!pendingEvents.some(e => e.dropped?.length))
+  const history = await s.history()
+  const turn1Events = history.filter(e => e.turn === 1)
+  const idxToolRes = turn1Events.findIndex(e => e.type === 'tool.result' && e.callId === 'step-1')
+  const idxSt1 = turn1Events.findIndex(e => e.type === 'user.message' && e.id === 'st-1')
+  const idxSt2 = turn1Events.findIndex(e => e.type === 'user.message' && e.id === 'st-2')
+  const idxReply = turn1Events.findIndex(e => e.type === 'assistant.message' && e.blocks?.[0]?.text === 'HANDOFF_REPLY')
+  assert.ok(idxToolRes >= 0 && idxSt1 > idxToolRes && idxSt2 > idxSt1 && idxReply > idxSt2)
+  assert.ok(history.some(e => e.type === 'user.message' && e.turn === 2 && e.id === 'fu-1'))
+
+  // 2. Cancelling a handed-off steer with Esc ('interrupt') settles cleanly as interrupted.
+  await s.submit({ text: 'wait', clientMessageId: 't3' })
+  await s.submit({ text: 'steer-handoff-wait', clientMessageId: 'st-cancel' }, 'steer')
+  await new Promise(r => setTimeout(r, 30))
+  assert.equal(s.status, 'running')
+  const receipt = await s.cancel('interrupt')
+  assert.deepEqual(receipt, { outcome: 'confirmed', stillQueued: [] })
+  assert.equal(s.status, 'idle')
+  const end3 = (await s.history()).find(e => e.type === 'turn.end' && e.turn === 3)
+  assert.equal(end3.reason.kind, 'interrupted')
+})
