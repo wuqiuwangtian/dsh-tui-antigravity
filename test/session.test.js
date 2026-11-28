@@ -1055,4 +1055,61 @@ test('steer handoff keeps the turn active across multiple steers, propagates han
   const turn6Users = allHistory.filter(e => e.turn === 6 && e.type === 'user.message').map(e => e.id)
   assert.deepEqual(turn5Users, ['t5', 'st-owner'])
   assert.deepEqual(turn6Users, ['st-rejected'])
+
+  // 5. Slow-image steer A followed immediately by plain-text steer B:
+  //    B must wait until A dispatches its RPC so wire order stays A -> B.
+  //    5a: A takes ownership, B is rejected with busy (falls back to turn 8),
+  //        A streams partial output and fails -> turn 7 ends error and A is NEVER resent.
+  const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=', 'base64')
+  let slowImageReads = 0
+  const slowImage = {
+    id: 'slow-steer-img',
+    name: 'slow.png',
+    mediaType: 'image/png',
+    read: () => {
+      slowImageReads++
+      return new Promise(resolve => setTimeout(() => resolve(png), 80))
+    },
+  }
+  const turn7End = observe(s, 'turn.end', e => e.turn === 7)
+  const turn8End = observe(s, 'turn.end', e => e.turn === 8)
+  await s.submit({ text: 'wait', clientMessageId: 't7' })
+  await s.submit({ text: 'steer-handoff-partial-error', clientMessageId: 'st-img-a', images: [slowImage] }, 'steer')
+  await s.submit({ text: 'steer-fail', clientMessageId: 'st-text-b' }, 'steer')
+  const end7 = await turn7End
+  assert.equal(end7.reason.kind, 'error')
+  assert.match(end7.reason.message, /connection interrupted/)
+  await turn8End
+  assert.equal(s.status, 'idle')
+  assert.equal(slowImageReads, 1)
+  const postHistory = await s.history()
+  assert.deepEqual(postHistory.filter(e => e.turn === 7 && e.type === 'user.message').map(e => e.id), ['t7', 'st-img-a'])
+  assert.deepEqual(postHistory.filter(e => e.turn === 8 && e.type === 'user.message').map(e => e.id), ['st-text-b'])
+  assert.equal(postHistory.filter(e => e.type === 'user.message' && e.id === 'st-img-a').length, 1)
+
+  //    5b: Slow-image A hands off cleanly to immediate text B which then streams partial output and fails:
+  //        A and B are dispatched and claimed in submission order A -> B, turn 9 ends error, neither is resent.
+  let slowImageReadsB = 0
+  const slowImageB = {
+    id: 'slow-steer-img-2',
+    name: 'slow2.png',
+    mediaType: 'image/png',
+    read: () => {
+      slowImageReadsB++
+      return new Promise(resolve => setTimeout(() => resolve(png), 80))
+    },
+  }
+  const turn9End = observe(s, 'turn.end', e => e.turn === 9)
+  await s.submit({ text: 'wait', clientMessageId: 't9' })
+  await s.submit({ text: 'steer-handoff-1', clientMessageId: 'st-img-a2', images: [slowImageB] }, 'steer')
+  await s.submit({ text: 'steer-handoff-partial-error', clientMessageId: 'st-text-b2' }, 'steer')
+  const end9 = await turn9End
+  assert.equal(end9.reason.kind, 'error')
+  assert.match(end9.reason.message, /connection interrupted/)
+  assert.equal(s.status, 'idle')
+  assert.equal(s.queue.length, 0)
+  assert.equal(slowImageReadsB, 1)
+  const finalHistory = await s.history()
+  assert.deepEqual(finalHistory.filter(e => e.turn === 9 && e.type === 'user.message').map(e => e.id), ['t9', 'st-img-a2', 'st-text-b2'])
+  assert.equal(finalHistory.filter(e => e.turn === 10).length, 0)
 })

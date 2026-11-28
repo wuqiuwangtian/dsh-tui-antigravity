@@ -64,6 +64,7 @@ export class Session {
     this.steered = new Map()
     this.steers = new Set()
     this.steerQueue = []
+    this.steerDispatch = Promise.resolve()
     this.cancelTimeoutMs = 5000
     this.reportQueries = new Map()
     this.reportPages = new Map()
@@ -919,12 +920,16 @@ export class Session {
       const id = input.clientMessageId
       const blocks = input.blocks ?? [{ type: 'text', text: input.text }]
       const steers = this.steers
+      const prevDispatch = this.steerDispatch
+      let releaseDispatch
+      this.steerDispatch = new Promise(resolve => { releaseDispatch = resolve })
       const entry = { input, blocks, rpcSent: false, handedOff: false, claimed: false, settled: false }
       this.steered.set(id, entry)
       this.steerQueue.push(entry)
       this.pending({})
       let steered
-      steered = this.steer(entry, steers).finally(() => {
+      steered = this.steer(entry, steers, prevDispatch, releaseDispatch).finally(() => {
+        releaseDispatch()
         entry.settled = true
         steers.delete(steered)
       })
@@ -984,11 +989,24 @@ export class Session {
     const ready = [...this.steered.values()].filter(entry => entry.handedOff)
     if (ready.length) this.claimSteers(ready, true)
   }
-  async steer(entry, steers = this.steers) {
+  async steer(entry, steers = this.steers, prevDispatch = Promise.resolve(), releaseDispatch = () => {}) {
     const { input, blocks } = entry
     const id = input.clientMessageId
+    let released = false
+    const release = () => {
+      if (released) return
+      released = true
+      releaseDispatch()
+    }
     try {
-      const prompt = await this.promptBlocks(blocks, input.images)
+      // Prepare attachments in parallel, then serialize session/prompt dispatch
+      // in user submission order without waiting for earlier steers to finish.
+      let prompt
+      try {
+        prompt = await this.promptBlocks(blocks, input.images)
+      } finally {
+        await prevDispatch
+      }
       if (this.steers !== steers) return
       if (!this.steered.has(id)) return
       if (this.cancelling || this.disposing) {
@@ -1008,7 +1026,9 @@ export class Session {
         this.turnOwner = entry
         entry.handedOff = true
       }
-      const result = await this.rpc.request('session/prompt', { sessionId: this.id, prompt })
+      const rpcPromise = this.rpc.request('session/prompt', { sessionId: this.id, prompt })
+      release()
+      const result = await rpcPromise
       if (this.steers !== steers) return
       const isOwner = this.turnOwner === entry
       if (result?.stopReason === 'cancelled') {
@@ -1032,6 +1052,7 @@ export class Session {
       // Non-owner resolved directly (e.g. an immediate steer-ACK server).
       if (this.steered.has(id)) this.claimSteers([entry], false)
     } catch (e) {
+      release()
       if (this.steers !== steers) return
       const isOwner = this.turnOwner === entry
       if (e?.code === -32000 || /unauthenticated|authentication required/i.test(e?.message ?? '')) {
@@ -1039,8 +1060,8 @@ export class Session {
         this.turnOutcome = { error: e }
         return
       }
-      if (isOwner) {
-        this.turnOwner = undefined
+      if (isOwner || entry.claimed) {
+        if (isOwner) this.turnOwner = undefined
         this.turnOutcome = { error: e }
         if (entry.claimed) return
         if (!this.steered.delete(id)) return
@@ -1069,6 +1090,8 @@ export class Session {
       this.queue.push({ input })
       this.pending({})
       this.emit({ type: 'notice', level: 'info', text: '当前步骤未能立即插入引导，消息已排入下一回合队列。' })
+    } finally {
+      release()
     }
   }
 
@@ -1110,6 +1133,7 @@ export class Session {
     const steers = new Set()
     this.steers = steers
     this.steerQueue = []
+    this.steerDispatch = Promise.resolve()
     this.turnOwner = 'primary'
     this.turnOutcome = undefined
     let notifyDispose
@@ -1148,6 +1172,7 @@ export class Session {
       await this.settleSteers()
       this.steers = new Set()
       this.steerQueue = []
+      this.steerDispatch = Promise.resolve()
       this.turnOwner = undefined
       this.turnOutcome = undefined
       this.notifyDispose = undefined
