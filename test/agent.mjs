@@ -138,6 +138,15 @@ for await (const line of createInterface({ input: process.stdin })) {
       prompting = id
       if (text === 'exit') process.exit(1)
       if (text === 'wait') break
+      if (text === 'slow-ok') {
+        const activeId = id
+        setTimeout(() => {
+          if (prompting !== activeId) return
+          prompting = undefined
+          send({ id: activeId, result: { stopReason: 'end_turn' } })
+        }, 40)
+        break
+      }
       if (text === 'step-tool') {
         update({ sessionUpdate: 'tool_call', toolCallId: 'step-1', kind: 'execute', name: 'run_command', title: 'sleep 3', status: 'in_progress' })
         break

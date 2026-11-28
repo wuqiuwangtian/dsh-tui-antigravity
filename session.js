@@ -18,6 +18,25 @@ import { googleLogin } from './login.js'
 import { connect, normalizeWorkspaceCwd } from './connection.js'
 
 const cancelled = () => ({ outcome: { outcome: 'cancelled' } })
+
+function abortable(promise, signal) {
+  if (!signal) return promise
+  if (signal.aborted) {
+    promise.catch(() => {})
+    return Promise.reject(signal.reason ?? new Error('aborted'))
+  }
+  return new Promise((resolve, reject) => {
+    const onAbort = () => {
+      promise.catch(() => {})
+      reject(signal.reason ?? new Error('aborted'))
+    }
+    signal.addEventListener('abort', onAbort, { once: true })
+    promise.then(
+      value => { signal.removeEventListener('abort', onAbort); resolve(value) },
+      error => { signal.removeEventListener('abort', onAbort); reject(error) },
+    )
+  })
+}
 const sessionReports = {
   diff: '查看本会话由 agy 报告的文件编辑',
   tasks: '查看本会话的计时器、动态工作流和后台智能体调用',
@@ -920,6 +939,7 @@ export class Session {
       const id = input.clientMessageId
       const blocks = input.blocks ?? [{ type: 'text', text: input.text }]
       const steers = this.steers
+      const turnSignal = this.turnAbort?.signal
       const prevDispatch = this.steerDispatch
       let releaseDispatch
       this.steerDispatch = new Promise(resolve => { releaseDispatch = resolve })
@@ -928,7 +948,7 @@ export class Session {
       this.steerQueue.push(entry)
       this.pending({})
       let steered
-      steered = this.steer(entry, steers, prevDispatch, releaseDispatch).finally(() => {
+      steered = this.steer(entry, steers, prevDispatch, releaseDispatch, turnSignal).finally(() => {
         releaseDispatch()
         entry.settled = true
         steers.delete(steered)
@@ -989,7 +1009,7 @@ export class Session {
     const ready = [...this.steered.values()].filter(entry => entry.handedOff)
     if (ready.length) this.claimSteers(ready, true)
   }
-  async steer(entry, steers = this.steers, prevDispatch = Promise.resolve(), releaseDispatch = () => {}) {
+  async steer(entry, steers = this.steers, prevDispatch = Promise.resolve(), releaseDispatch = () => {}, signal) {
     const { input, blocks } = entry
     const id = input.clientMessageId
     let released = false
@@ -1001,11 +1021,13 @@ export class Session {
     try {
       // Prepare attachments in parallel, then serialize session/prompt dispatch
       // in user submission order without waiting for earlier steers to finish.
+      // Local waits abort immediately on cancel/dispose so unsent steers never
+      // block cancellation or fire late after an attachment resolves.
       let prompt
       try {
-        prompt = await this.promptBlocks(blocks, input.images)
+        prompt = await this.promptBlocks(blocks, input.images, signal)
       } finally {
-        await prevDispatch
+        await abortable(prevDispatch, signal).catch(() => {})
       }
       if (this.steers !== steers) return
       if (!this.steered.has(id)) return
@@ -1095,9 +1117,12 @@ export class Session {
     }
   }
 
-  async promptBlocks(blocks, images) {
+  async promptBlocks(blocks, images, signal) {
     const prompt = blocks.filter(b => b.type === 'text').map(b => ({ type: 'text', text: b.text }))
-    for (const image of images ?? []) prompt.push({ type: 'image', mimeType: image.mediaType ?? 'image/png', data: Buffer.from(await image.read()).toString('base64') })
+    for (const image of images ?? []) {
+      const data = await abortable(Promise.resolve().then(() => image.read(signal)), signal)
+      prompt.push({ type: 'image', mimeType: image.mediaType ?? 'image/png', data: Buffer.from(data).toString('base64') })
+    }
     return prompt
   }
   async settleSteers() {
@@ -1136,11 +1161,13 @@ export class Session {
     this.steerDispatch = Promise.resolve()
     this.turnOwner = 'primary'
     this.turnOutcome = undefined
+    const turnAbort = new AbortController()
+    this.turnAbort = turnAbort
     let notifyDispose
     const disposeSignal = new Promise(resolve => { notifyDispose = resolve })
     this.notifyDispose = notifyDispose
     try {
-      const prompt = await this.promptBlocks(blocks, input.images)
+      const prompt = await this.promptBlocks(blocks, input.images, turnAbort.signal)
       if (this.cancelling) reason = { kind: 'interrupted' }
       else {
         this.acceptSteers = true
@@ -1161,7 +1188,9 @@ export class Session {
         if (result.usage) usage = { input: result.usage.inputTokens, output: result.usage.outputTokens, cacheRead: result.usage.cachedReadTokens }
       }
     } catch (e) {
-      if (e.code === -32000 || /unauthenticated|authentication required/i.test(e.message)) {
+      if (this.cancelling && turnAbort.signal.aborted && !this.turnOutcome?.error) {
+        reason = { kind: 'interrupted' }
+      } else if (e.code === -32000 || /unauthenticated|authentication required/i.test(e.message)) {
         this.authHint = 'agy 需要重新授权。请运行 /login，然后继续会话。'
         this.clearPending('dropped')
         reason = { kind: 'error', message: this.authHint }
@@ -1175,6 +1204,7 @@ export class Session {
       this.steerDispatch = Promise.resolve()
       this.turnOwner = undefined
       this.turnOutcome = undefined
+      this.turnAbort = undefined
       this.notifyDispose = undefined
       this.flush()
       this.dismiss()
@@ -1205,6 +1235,7 @@ export class Session {
     const active = this.active
     this.cancelling = true
     this.cancelCause = cause
+    this.turnAbort?.abort()
     this.dismiss()
     try { await this.rpc?.notify('session/cancel', { sessionId: this.id }) } catch {}
     let timer
@@ -1215,6 +1246,7 @@ export class Session {
   }
   async dispose() {
     this.disposing = true
+    this.turnAbort?.abort()
     this.notifyDispose?.()
     this.clearReports()
     this.localAction?.abort()

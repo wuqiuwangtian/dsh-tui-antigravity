@@ -1112,4 +1112,37 @@ test('steer handoff keeps the turn active across multiple steers, propagates han
   const finalHistory = await s.history()
   assert.deepEqual(finalHistory.filter(e => e.turn === 9 && e.type === 'user.message').map(e => e.id), ['t9', 'st-img-a2', 'st-text-b2'])
   assert.equal(finalHistory.filter(e => e.turn === 10).length, 0)
+
+  // 6. Primary prompt finishes while steer A is still blocked reading its image and
+  //    steer B is waiting behind A (neither RPC sent yet). Pressing Esc MUST confirm
+  //    cancellation and return to idle WITHOUT releasing A's image read, and neither
+  //    A nor B may ever be sent (even if A's image read resolves later).
+  const sentPrompts = []
+  const origRequest = s.rpc.request.bind(s.rpc)
+  s.rpc.request = (method, params, options) => {
+    if (method === 'session/prompt') sentPrompts.push(params.prompt?.[0]?.text)
+    return origRequest(method, params, options)
+  }
+  let releaseHungImage
+  const hungImage = {
+    id: 'hung-steer-img',
+    name: 'hung.png',
+    mediaType: 'image/png',
+    // Deliberately ignore AbortSignal to verify cancellation does not depend on reader cooperation.
+    read: () => new Promise(resolve => { releaseHungImage = () => resolve(png) }),
+  }
+  await s.submit({ text: 'slow-ok', clientMessageId: 't10' })
+  await s.submit({ text: 'never-send-a', clientMessageId: 'st-hung-a', images: [hungImage] }, 'steer')
+  await s.submit({ text: 'never-send-b', clientMessageId: 'st-hung-b' }, 'steer')
+  // Wait for primary 'slow-ok' (40ms) to finish while A is still stuck in image.read().
+  await new Promise(r => setTimeout(r, 80))
+  assert.equal(s.status, 'running')
+  const cancelReceipt = await s.cancel('interrupt')
+  assert.deepEqual(cancelReceipt, { outcome: 'confirmed', stillQueued: [] })
+  assert.equal(s.status, 'idle')
+  assert.deepEqual(sentPrompts, ['slow-ok'])
+  // Even after the blocked image read eventually resolves, A and B are never sent.
+  releaseHungImage?.()
+  await new Promise(r => setTimeout(r, 40))
+  assert.deepEqual(sentPrompts, ['slow-ok'])
 })
