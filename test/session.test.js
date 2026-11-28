@@ -1031,4 +1031,28 @@ test('steer handoff keeps the turn active across multiple steers, propagates han
   const end4 = await turn4End
   assert.equal(end4.reason.kind, 'interrupted')
   assert.equal(s.status, 'idle')
+
+  // 4. First steer owns the turn and is streaming; a second steer arrives, first steer
+  //    emits another chunk, second steer is rejected with busy, then first steer finishes.
+  //    Second steer MUST NOT be prematurely claimed into turn 5; it falls back to turn 6.
+  const part1Seen = observe(s, 'assistant.delta', e => e.delta?.text === 'STREAM_PART_1')
+  const notice = observe(s, 'notice', e => e.level === 'info')
+  const turn5End = observe(s, 'turn.end', e => e.turn === 5)
+  const turn6End = observe(s, 'turn.end', e => e.turn === 6)
+  await s.submit({ text: 'wait', clientMessageId: 't5' })
+  await s.submit({ text: 'steer-handoff-streaming', clientMessageId: 'st-owner' }, 'steer')
+  await part1Seen
+  await s.submit({ text: 'steer-reject-after-chunk', clientMessageId: 'st-rejected' }, 'steer')
+  await notice
+  const end5 = await turn5End
+  assert.equal(end5.reason.kind, 'completed')
+  const end6 = await turn6End
+  assert.equal(end6.reason.kind, 'completed')
+  assert.equal(s.status, 'idle')
+
+  const allHistory = await s.history()
+  const turn5Users = allHistory.filter(e => e.turn === 5 && e.type === 'user.message').map(e => e.id)
+  const turn6Users = allHistory.filter(e => e.turn === 6 && e.type === 'user.message').map(e => e.id)
+  assert.deepEqual(turn5Users, ['t5', 'st-owner'])
+  assert.deepEqual(turn6Users, ['st-rejected'])
 })

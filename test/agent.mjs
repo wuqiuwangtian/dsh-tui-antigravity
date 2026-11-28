@@ -111,7 +111,28 @@ for await (const line of createInterface({ input: process.stdin })) {
           }, 40)
         } else if (text === 'steer-handoff-slow-cancel') {
           cancelDelayMs = 300
+        } else if (text === 'steer-handoff-streaming') {
+          const activeId = id
+          setTimeout(() => {
+            if (prompting !== activeId) return
+            update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'STREAM_PART_1' } })
+          }, 20)
         }
+        break
+      }
+      if (text === 'steer-reject-after-chunk' && prompting !== undefined) {
+        // First steer emits another chunk while still owning the turn, then rejects
+        // this second steer with busy, and finally completes cleanly.
+        const activeId = prompting
+        update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'STREAM_PART_2' } })
+        setTimeout(() => {
+          send({ id, error: { code: -32603, message: 'busy' } })
+          setTimeout(() => {
+            if (prompting !== activeId) return
+            prompting = undefined
+            send({ id: activeId, result: { stopReason: 'end_turn' } })
+          }, 30)
+        }, 20)
         break
       }
       prompting = id

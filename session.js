@@ -63,6 +63,7 @@ export class Session {
     this.directories = []
     this.steered = new Map()
     this.steers = new Set()
+    this.steerQueue = []
     this.cancelTimeoutMs = 5000
     this.reportQueries = new Map()
     this.reportPages = new Map()
@@ -918,11 +919,15 @@ export class Session {
       const id = input.clientMessageId
       const blocks = input.blocks ?? [{ type: 'text', text: input.text }]
       const steers = this.steers
-      const entry = { input, blocks, rpcSent: false, handedOff: false, claimed: false }
+      const entry = { input, blocks, rpcSent: false, handedOff: false, claimed: false, settled: false }
       this.steered.set(id, entry)
+      this.steerQueue.push(entry)
       this.pending({})
       let steered
-      steered = this.steer(entry, steers).finally(() => steers.delete(steered))
+      steered = this.steer(entry, steers).finally(() => {
+        entry.settled = true
+        steers.delete(steered)
+      })
       steers.add(steered)
       return { accepted: true }
     }
@@ -944,10 +949,21 @@ export class Session {
     this.active = this.run(input)
     return { accepted: true }
   }
-  markSteersHandedOff() {
-    for (const entry of this.steered.values()) {
-      if (entry.rpcSent) entry.handedOff = true
+  nextSentSteer(afterOwner) {
+    const start = afterOwner === 'primary' ? 0 : this.steerQueue.indexOf(afterOwner) + 1
+    if (start < 0) return undefined
+    for (let i = start; i < this.steerQueue.length; i++) {
+      const candidate = this.steerQueue[i]
+      if (candidate.rpcSent && !candidate.settled) return candidate
     }
+    return undefined
+  }
+  advanceTurnOwner(resolvedOwner) {
+    if (this.turnOwner !== resolvedOwner) return undefined
+    const next = this.nextSentSteer(resolvedOwner)
+    this.turnOwner = next
+    if (next) next.handedOff = true
+    return next
   }
   claimSteers(entries, flushBefore = true) {
     if (!entries.length) return
@@ -986,52 +1002,68 @@ export class Session {
         return
       }
       entry.rpcSent = true
-      if (this.primarySettled) entry.handedOff = true
+      // Only promote immediately if the previous owner already resolved while
+      // this steer was still preparing its prompt blocks.
+      if (this.turnOwner === undefined && !this.turnOutcome?.error) {
+        this.turnOwner = entry
+        entry.handedOff = true
+      }
       const result = await this.rpc.request('session/prompt', { sessionId: this.id, prompt })
       if (this.steers !== steers) return
-      this.turnOutcome = { result }
+      const isOwner = this.turnOwner === entry
       if (result?.stopReason === 'cancelled') {
+        if (isOwner) {
+          this.turnOwner = undefined
+          this.turnOutcome = { result }
+        }
         if (!this.cancelling && this.steered.delete(id)) this.pending({ discarded: [id] })
         return
       }
-      // When another steer is already in flight, agy acp has handed turn
-      // ownership forward to it; keep earlier steers marked handedOff so they
-      // claim together in order right before the model's next step.
-      if (steers.size > 1) {
-        this.markSteersHandedOff()
+      if (isOwner) {
+        // Hand ownership strictly to the next adjacent sent steer if one is
+        // already in flight; otherwise this steer finishes the turn.
+        const next = this.advanceTurnOwner(entry)
+        if (next) return
+        this.turnOutcome = { result }
+        const toClaim = [...this.steered.values()].filter(e => e.handedOff || e === entry)
+        if (toClaim.length) this.claimSteers(toClaim, false)
         return
       }
-      const toClaim = [...this.steered.values()].filter(e => e.handedOff || e.input.clientMessageId === id)
-      if (toClaim.length) this.claimSteers(toClaim, false)
+      // Non-owner resolved directly (e.g. an immediate steer-ACK server).
+      if (this.steered.has(id)) this.claimSteers([entry], false)
     } catch (e) {
       if (this.steers !== steers) return
-      const soleOwner = steers.size <= 1 && (entry.handedOff || this.primarySettled)
+      const isOwner = this.turnOwner === entry
       if (e?.code === -32000 || /unauthenticated|authentication required/i.test(e?.message ?? '')) {
+        if (isOwner) this.turnOwner = undefined
         this.turnOutcome = { error: e }
         return
       }
-      if (entry.claimed) {
-        // Already shown in transcript (and may have produced partial output):
-        // do not resend it; propagate the failure as this turn's outcome.
+      if (isOwner) {
+        this.turnOwner = undefined
         this.turnOutcome = { error: e }
+        if (entry.claimed) return
+        if (!this.steered.delete(id)) return
+        if (this.disposing) return
+        if (this.cancelling) {
+          if (this.cancelCause === 'user') {
+            this.queue.push({ input })
+            this.pending({})
+          } else this.pending({ discarded: [id] })
+        } else {
+          this.pending({ dropped: [id] })
+        }
         return
       }
-      if (!this.steered.delete(id)) {
-        if (soleOwner && !this.cancelling && !this.disposing) this.turnOutcome = { error: e }
-        return
-      }
+      // Non-owner steer was rejected before taking ownership: move back to
+      // the next-turn queue without disturbing the active turn's outcome.
+      if (!this.steered.delete(id)) return
       if (this.disposing) return
       if (this.cancelling) {
         if (this.cancelCause === 'user') {
           this.queue.push({ input })
           this.pending({})
         } else this.pending({ discarded: [id] })
-        if (soleOwner) this.turnOutcome = { error: e }
-        return
-      }
-      if (soleOwner) {
-        this.pending({ dropped: [id] })
-        this.turnOutcome = { error: e }
         return
       }
       this.queue.push({ input })
@@ -1077,7 +1109,8 @@ export class Session {
     this.user(input.text, input.clientMessageId, blocks, input.images)
     const steers = new Set()
     this.steers = steers
-    this.primarySettled = false
+    this.steerQueue = []
+    this.turnOwner = 'primary'
     this.turnOutcome = undefined
     let notifyDispose
     const disposeSignal = new Promise(resolve => { notifyDispose = resolve })
@@ -1088,15 +1121,13 @@ export class Session {
       else {
         this.acceptSteers = true
         let result = await this.rpc.request('session/prompt', { sessionId: this.id, prompt })
-        this.primarySettled = true
         // agy acp accepts a concurrent session/prompt (steer) by resolving the
         // previous prompt immediately and keeping the newest steer RPC open
-        // until the turn completes. Keep tracking handed-off steers until they
-        // actually settle (or the session is disposed), so cancel() reports
-        // `unknown` on timeout rather than prematurely confirming completion.
+        // until the turn completes. Hand ownership strictly along adjacent
+        // prompts and keep tracking until all handed-off steers settle.
         if (result.stopReason !== 'cancelled') {
+          this.advanceTurnOwner('primary')
           while (steers.size > 0 && !this.disposing) {
-            this.markSteersHandedOff()
             await Promise.race([Promise.allSettled([...steers]), disposeSignal])
           }
         }
@@ -1116,7 +1147,8 @@ export class Session {
       this.acceptSteers = false
       await this.settleSteers()
       this.steers = new Set()
-      this.primarySettled = false
+      this.steerQueue = []
+      this.turnOwner = undefined
       this.turnOutcome = undefined
       this.notifyDispose = undefined
       this.flush()
