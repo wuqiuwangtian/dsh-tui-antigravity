@@ -37,6 +37,7 @@ const send = data => process.stdout.write(JSON.stringify({ jsonrpc: '2.0', ...da
 const update = update => send({ method: 'session/update', params: { sessionId, update } })
 let prompting
 let cancelDelayMs = 0
+let cancelAuthError = false
 for await (const line of createInterface({ input: process.stdin })) {
   const { method, params, id, result } = JSON.parse(line)
   if (method && process.env.AGY_FIXTURE_RPC_LOG) {
@@ -138,6 +139,10 @@ for await (const line of createInterface({ input: process.stdin })) {
       prompting = id
       if (text === 'exit') process.exit(1)
       if (text === 'wait') break
+      if (text === 'wait-auth-error') {
+        cancelAuthError = true
+        break
+      }
       if (text === 'slow-ok') {
         const activeId = id
         setTimeout(() => {
@@ -166,8 +171,13 @@ for await (const line of createInterface({ input: process.stdin })) {
       if (prompting !== undefined) {
         const activeId = prompting
         const delay = cancelDelayMs
+        const authErr = cancelAuthError
         cancelDelayMs = 0
-        if (delay > 0) {
+        cancelAuthError = false
+        if (authErr) {
+          prompting = undefined
+          send({ id: activeId, error: { code: -32000, message: 'Authentication required' } })
+        } else if (delay > 0) {
           setTimeout(() => {
             if (prompting !== activeId) return
             prompting = undefined

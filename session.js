@@ -1166,8 +1166,11 @@ export class Session {
     let notifyDispose
     const disposeSignal = new Promise(resolve => { notifyDispose = resolve })
     this.notifyDispose = notifyDispose
+    let preparing = false
     try {
+      preparing = true
       const prompt = await this.promptBlocks(blocks, input.images, turnAbort.signal)
+      preparing = false
       if (this.cancelling) reason = { kind: 'interrupted' }
       else {
         this.acceptSteers = true
@@ -1188,7 +1191,7 @@ export class Session {
         if (result.usage) usage = { input: result.usage.inputTokens, output: result.usage.outputTokens, cacheRead: result.usage.cachedReadTokens }
       }
     } catch (e) {
-      if (this.cancelling && turnAbort.signal.aborted && !this.turnOutcome?.error) {
+      if (preparing && this.cancelling && turnAbort.signal.aborted) {
         reason = { kind: 'interrupted' }
       } else if (e.code === -32000 || /unauthenticated|authentication required/i.test(e.message)) {
         this.authHint = 'agy 需要重新授权。请运行 /login，然后继续会话。'

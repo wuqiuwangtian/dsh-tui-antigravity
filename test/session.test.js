@@ -1145,4 +1145,15 @@ test('steer handoff keeps the turn active across multiple steers, propagates han
   releaseHungImage?.()
   await new Promise(r => setTimeout(r, 40))
   assert.deepEqual(sentPrompts, ['slow-ok'])
+
+  // 7. Primary prompt already sent, user presses Esc, and agy returns -32000
+  //    Authentication required: MUST report auth error & set authHint, NOT mask as interrupted.
+  const turn11End = observe(s, 'turn.end', e => e.turn === 11)
+  await s.submit({ text: 'wait-auth-error', clientMessageId: 't11' })
+  const authCancelReceipt = await s.cancel('interrupt')
+  assert.deepEqual(authCancelReceipt, { outcome: 'confirmed', stillQueued: [] })
+  const end11 = await turn11End
+  assert.equal(end11.reason.kind, 'error')
+  assert.match(end11.reason.message, /\/login/)
+  assert.match(s.authHint, /\/login/)
 })
