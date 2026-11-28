@@ -36,6 +36,7 @@ const configOptions = process.env.AGY_FIXTURE_CONFIG ? JSON.parse(process.env.AG
 const send = data => process.stdout.write(JSON.stringify({ jsonrpc: '2.0', ...data }) + '\n')
 const update = update => send({ method: 'session/update', params: { sessionId, update } })
 let prompting
+let cancelDelayMs = 0
 for await (const line of createInterface({ input: process.stdin })) {
   const { method, params, id, result } = JSON.parse(line)
   if (method && process.env.AGY_FIXTURE_RPC_LOG) {
@@ -97,6 +98,19 @@ for await (const line of createInterface({ input: process.stdin })) {
             prompting = undefined
             send({ id: activeId, result: { stopReason: 'end_turn', usage: { inputTokens: 100, outputTokens: 12, cachedReadTokens: 50 } } })
           }, 120)
+        } else if (text === 'steer-handoff-partial-error') {
+          const activeId = id
+          setTimeout(() => {
+            if (prompting !== activeId) return
+            update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'PARTIAL_TEXT' } })
+            setTimeout(() => {
+              if (prompting !== activeId) return
+              prompting = undefined
+              send({ id: activeId, error: { code: -32001, message: 'connection interrupted' } })
+            }, 30)
+          }, 40)
+        } else if (text === 'steer-handoff-slow-cancel') {
+          cancelDelayMs = 300
         }
         break
       }
@@ -121,8 +135,18 @@ for await (const line of createInterface({ input: process.stdin })) {
     case 'session/cancel':
       if (prompting !== undefined) {
         const activeId = prompting
-        prompting = undefined
-        send({ id: activeId, result: { stopReason: 'cancelled' } })
+        const delay = cancelDelayMs
+        cancelDelayMs = 0
+        if (delay > 0) {
+          setTimeout(() => {
+            if (prompting !== activeId) return
+            prompting = undefined
+            send({ id: activeId, result: { stopReason: 'cancelled' } })
+          }, delay)
+        } else {
+          prompting = undefined
+          send({ id: activeId, result: { stopReason: 'cancelled' } })
+        }
       }
       break
     default:

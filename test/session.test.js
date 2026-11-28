@@ -964,7 +964,7 @@ test('edit diffs emit compact unified patches so SplitDiffView does not duplicat
   assert.ok(!diffReport.includes('undefined'))
 })
 
-test('real agy steer handoff keeps the turn active across multiple steers, drains followup after completion, and handles cancel', async t => {
+test('steer handoff keeps the turn active across multiple steers, propagates handed-off errors, and preserves unconfirmed cancel tracking', async t => {
   const s = await start(t)
   const pendingEvents = []
   s.subscribe(events => {
@@ -1001,14 +1001,34 @@ test('real agy steer handoff keeps the turn active across multiple steers, drain
   assert.ok(idxToolRes >= 0 && idxSt1 > idxToolRes && idxSt2 > idxSt1 && idxReply > idxSt2)
   assert.ok(history.some(e => e.type === 'user.message' && e.turn === 2 && e.id === 'fu-1'))
 
-  // 2. Cancelling a handed-off steer with Esc ('interrupt') settles cleanly as interrupted.
+  // 2. Handed-off steer streams partial text (already claimed) and then fails:
+  //    turn.end MUST report error (not completed), and the claimed steer MUST NOT be resent.
+  const turn3End = observe(s, 'turn.end', e => e.turn === 3)
   await s.submit({ text: 'wait', clientMessageId: 't3' })
-  await s.submit({ text: 'steer-handoff-wait', clientMessageId: 'st-cancel' }, 'steer')
+  await s.submit({ text: 'steer-handoff-partial-error', clientMessageId: 'st-err' }, 'steer')
+  const end3 = await turn3End
+  assert.equal(end3.reason.kind, 'error')
+  assert.match(end3.reason.message, /connection interrupted/)
+  assert.equal(s.status, 'idle')
+  assert.equal(s.queue.length, 0)
+  const turn3History = (await s.history()).filter(e => e.turn === 3)
+  assert.equal(turn3History.filter(e => e.type === 'user.message' && e.id === 'st-err').length, 1)
+  assert.ok(turn3History.some(e => e.type === 'assistant.message' && e.blocks?.[0]?.text === 'PARTIAL_TEXT'))
+  assert.equal((await s.history()).filter(e => e.turn === 4).length, 0)
+
+  // 3. Cancelling a handed-off steer that takes longer than cancelTimeoutMs:
+  //    cancel() MUST return outcome: 'unknown' while keeping tracking alive, and
+  //    once the steer finally returns cancelled, turn.end records interrupted (not completed).
+  s.cancelTimeoutMs = 120
+  await s.submit({ text: 'wait', clientMessageId: 't4' })
+  await s.submit({ text: 'steer-handoff-slow-cancel', clientMessageId: 'st-slow' }, 'steer')
   await new Promise(r => setTimeout(r, 30))
   assert.equal(s.status, 'running')
+  const turn4End = observe(s, 'turn.end', e => e.turn === 4)
   const receipt = await s.cancel('interrupt')
-  assert.deepEqual(receipt, { outcome: 'confirmed', stillQueued: [] })
+  assert.equal(receipt.outcome, 'unknown')
+  assert.equal(s.status, 'running')
+  const end4 = await turn4End
+  assert.equal(end4.reason.kind, 'interrupted')
   assert.equal(s.status, 'idle')
-  const end3 = (await s.history()).find(e => e.type === 'turn.end' && e.turn === 3)
-  assert.equal(end3.reason.kind, 'interrupted')
 })
